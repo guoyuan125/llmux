@@ -1,0 +1,22 @@
+# Binaries
+bin/
+llmux
+
+# Data
+data/
+
+# Frontend build output
+web/out/
+web/node_modules/
+web/.next/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Environment
+.env

@@ -1,0 +1,9 @@
+services:
+  llmux:
+    build: .
+    ports:
+      - '8080:8080'
+    volumes:
+      - './data:/app/data'
+    container_name: llmux
+    restart: unless-stopped
