@@ -5,19 +5,25 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/liuguoyuan/llmux/internal/config"
+	"github.com/liuguoyuan/llmux/internal/gateway/relay"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gorm.io/gorm"
 )
 
 // Handler holds dependencies for all HTTP handlers.
 type Handler struct {
-	db  *gorm.DB
-	cfg *config.Config
+	db      *gorm.DB
+	cfg     *config.Config
+	gateway *relay.Gateway
 }
 
 // New creates a new handler instance.
 func New(db *gorm.DB, cfg *config.Config) *Handler {
-	return &Handler{db: db, cfg: cfg}
+	return &Handler{
+		db:      db,
+		cfg:     cfg,
+		gateway: relay.NewGateway(db),
+	}
 }
 
 // Health returns server health status.

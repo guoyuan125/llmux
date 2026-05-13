@@ -1,12 +1,16 @@
 package middleware
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/liuguoyuan/llmux/internal/config"
 	"github.com/liuguoyuan/llmux/internal/model"
 	"gorm.io/gorm"
 )
@@ -16,11 +20,9 @@ func APIKeyAuth(db *gorm.DB, keyPrefix string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var apiKey string
 
-		// Anthropic style: x-api-key header
 		if key := c.GetHeader("x-api-key"); key != "" {
 			apiKey = key
 		} else if auth := c.GetHeader("Authorization"); auth != "" {
-			// OpenAI style: Bearer token
 			apiKey = strings.TrimPrefix(auth, "Bearer ")
 		}
 
@@ -35,7 +37,7 @@ func APIKeyAuth(db *gorm.DB, keyPrefix string) gin.HandlerFunc {
 		}
 
 		var keyObj model.APIKey
-		if err := db.Where("key = ?", apiKey).First(&keyObj).Error; err != nil {
+		if err := db.Where("`key` = ?", apiKey).First(&keyObj).Error; err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid API key"})
 			return
 		}
@@ -50,7 +52,6 @@ func APIKeyAuth(db *gorm.DB, keyPrefix string) gin.HandlerFunc {
 			return
 		}
 
-		// Check cost limit
 		if keyObj.MaxCost > 0 {
 			var stats model.StatsAPIKey
 			db.Where("api_key_id = ?", keyObj.ID).First(&stats)
@@ -78,17 +79,79 @@ func JWTAuth(secret string) gin.HandlerFunc {
 		}
 
 		token = strings.TrimPrefix(token, "Bearer ")
-		if !verifyJWT(token, secret) {
+		claims, err := verifyJWT(token, secret)
+		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
 		}
+
+		c.Set("username", claims.Username)
 		c.Next()
 	}
 }
 
-// verifyJWT validates a JWT token. Implementation uses standard HS256.
-func verifyJWT(token, secret string) bool {
-	// TODO: implement proper JWT verification
-	_ = config.Config{}
-	return token != "" && secret != ""
+// JWTClaims holds JWT payload.
+type JWTClaims struct {
+	Username string `json:"username"`
+	Exp      int64  `json:"exp"`
+}
+
+// GenerateJWT creates a signed JWT token.
+func GenerateJWT(secret, username string, duration time.Duration) string {
+	header := base64url([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	claims := JWTClaims{
+		Username: username,
+		Exp:      time.Now().Add(duration).Unix(),
+	}
+	claimsJSON, _ := json.Marshal(claims)
+	payload := base64url(claimsJSON)
+
+	signingInput := header + "." + payload
+	sig := signHS256([]byte(signingInput), []byte(secret))
+
+	return signingInput + "." + base64url(sig)
+}
+
+func verifyJWT(token, secret string) (*JWTClaims, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid token format")
+	}
+
+	signingInput := parts[0] + "." + parts[1]
+	expectedSig := signHS256([]byte(signingInput), []byte(secret))
+	actualSig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("invalid signature encoding")
+	}
+
+	if !hmac.Equal(expectedSig, actualSig) {
+		return nil, fmt.Errorf("invalid signature")
+	}
+
+	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid claims encoding")
+	}
+
+	var claims JWTClaims
+	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
+		return nil, fmt.Errorf("invalid claims")
+	}
+
+	if claims.Exp > 0 && time.Now().Unix() > claims.Exp {
+		return nil, fmt.Errorf("token expired")
+	}
+
+	return &claims, nil
+}
+
+func signHS256(data, key []byte) []byte {
+	h := hmac.New(sha256.New, key)
+	h.Write(data)
+	return h.Sum(nil)
+}
+
+func base64url(data []byte) string {
+	return base64.RawURLEncoding.EncodeToString(data)
 }

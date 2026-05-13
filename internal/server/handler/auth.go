@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/liuguoyuan/llmux/internal/model"
+	"github.com/liuguoyuan/llmux/internal/server/middleware"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -22,33 +23,26 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
+	// Check against DB user first
 	var user model.User
-	if err := h.db.Where("username = ?", req.Username).First(&user).Error; err != nil {
-		// Check default admin credentials
-		if req.Username == h.cfg.Auth.AdminUser && req.Password == h.cfg.Auth.AdminPass {
-			token := generateJWT(h.cfg.Auth.JWTSecret, req.Username)
-			c.JSON(http.StatusOK, gin.H{"token": token, "expires_at": time.Now().Add(24 * time.Hour).Unix()})
+	if err := h.db.Where("username = ?", req.Username).First(&user).Error; err == nil {
+		if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 			return
 		}
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		token := middleware.GenerateJWT(h.cfg.Auth.JWTSecret, user.Username, 24*time.Hour)
+		c.JSON(http.StatusOK, gin.H{"token": token, "expires_at": time.Now().Add(24 * time.Hour).Unix()})
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+	// Fallback to default admin credentials from config
+	if req.Username == h.cfg.Auth.AdminUser && req.Password == h.cfg.Auth.AdminPass {
+		token := middleware.GenerateJWT(h.cfg.Auth.JWTSecret, req.Username, 24*time.Hour)
+		c.JSON(http.StatusOK, gin.H{"token": token, "expires_at": time.Now().Add(24 * time.Hour).Unix()})
 		return
 	}
 
-	token := generateJWT(h.cfg.Auth.JWTSecret, user.Username)
-	c.JSON(http.StatusOK, gin.H{"token": token, "expires_at": time.Now().Add(24 * time.Hour).Unix()})
-}
-
-// generateJWT creates a simple JWT token.
-func generateJWT(secret, username string) string {
-	// TODO: implement proper JWT with exp claim
-	_ = secret
-	_ = username
-	return "placeholder-jwt-token"
+	c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 }
 
 // GetSettings returns all settings.
