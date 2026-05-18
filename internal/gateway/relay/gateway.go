@@ -20,6 +20,7 @@ import (
 	"github.com/liuguoyuan/llmux/internal/gateway/session"
 	"github.com/liuguoyuan/llmux/internal/metrics"
 	"github.com/liuguoyuan/llmux/internal/model"
+	"github.com/liuguoyuan/llmux/internal/ratelimit"
 	"github.com/liuguoyuan/llmux/internal/transformer/types"
 	inboundAnthropic "github.com/liuguoyuan/llmux/internal/transformer/inbound/anthropic"
 	inboundOpenAI "github.com/liuguoyuan/llmux/internal/transformer/inbound/openai"
@@ -32,10 +33,11 @@ import (
 
 // Gateway is the core relay engine.
 type Gateway struct {
-	db       *gorm.DB
-	circuit  *circuit.Manager
-	sessions *session.Store
-	client   *http.Client
+	db           *gorm.DB
+	circuit      *circuit.Manager
+	sessions     *session.Store
+	client       *http.Client
+	logPublisher func(log *model.AuditLog)
 }
 
 // NewGateway creates a new relay gateway.
@@ -59,6 +61,11 @@ func NewGateway(db *gorm.DB) *Gateway {
 		sessions: session.NewStore(),
 		client:   &http.Client{Transport: transport},
 	}
+}
+
+// SetLogPublisher sets the callback invoked on each audit log creation.
+func (g *Gateway) SetLogPublisher(fn func(log *model.AuditLog)) {
+	g.logPublisher = fn
 }
 
 // InboundType identifies the inbound protocol.
@@ -151,6 +158,7 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 		// Circuit breaker check
 		cbKey := circuit.BreakerKey(item.ChannelID, 0)
 		if !g.circuit.Allow(cbKey) {
+			log.Printf("[RELAY] circuit breaker OPEN for channel %d, skipping", item.ChannelID)
 			continue
 		}
 
@@ -174,16 +182,46 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 		}
 
 		// Set actual upstream model
-		internalReq.Model = item.ModelName
+		if item.ModelName != "" && item.ModelName != "*" {
+			internalReq.Model = item.ModelName
+		}
 
 		// Get outbound adapter
 		outAdapter := g.getOutbound(channel.Type)
 
-		// Build outbound request
-		outReq, err := outAdapter.TransformRequest(c.Request.Context(), internalReq, baseURL, channelKey.Key)
-		if err != nil {
-			lastErr = err
-			continue
+		var outReq *types.OutboundHTTPRequest
+
+		// For Anthropic→Anthropic, passthrough the raw request body with only model name replaced.
+		// This preserves thinking blocks, signatures, and other protocol-specific fields.
+		if inboundType == InboundAnthropic && channel.Type == model.ChannelTypeAnthropic {
+			upstreamModel := item.ModelName
+			modifiedBody := replaceModelInBody(body, upstreamModel)
+			url := strings.TrimRight(baseURL, "/") + "/v1/messages"
+			headers := map[string]string{
+				"Content-Type":      "application/json",
+				"x-api-key":         channelKey.Key,
+				"anthropic-version": "2023-06-01",
+			}
+			// Forward client's anthropic-beta and anthropic-version headers
+			if v := c.GetHeader("anthropic-beta"); v != "" {
+				headers["anthropic-beta"] = v
+			}
+			if v := c.GetHeader("anthropic-version"); v != "" {
+				headers["anthropic-version"] = v
+			}
+			outReq = &types.OutboundHTTPRequest{
+				Method:  "POST",
+				URL:     url,
+				Headers: headers,
+				Body:    modifiedBody,
+			}
+		} else {
+			// Build outbound request via transformer
+			outReq, err = outAdapter.TransformRequest(c.Request.Context(), internalReq, baseURL, channelKey.Key)
+			if err != nil {
+				lastErr = err
+				continue
+			}
 		}
 
 		// Apply param override
@@ -199,6 +237,13 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 		}
 		for k, v := range outReq.Headers {
 			httpReq.Header.Set(k, v)
+		}
+
+		// Forward passthrough headers from client request
+		for _, h := range []string{"comate_custom_header"} {
+			if v := c.GetHeader(h); v != "" {
+				httpReq.Header.Set(h, v)
+			}
 		}
 
 		// Use channel-specific proxy if configured
@@ -237,9 +282,19 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 
 		// Handle response
 		if isStream {
-			g.handleStreamResponse(c, resp, inAdapter, outAdapter, &channel, channelKey, requestModel, startTime, apiKeyID, attempts, group.FirstTokenTimeout)
+			// When inbound and outbound are both Anthropic, raw passthrough preserves
+			// thinking blocks and other protocol-specific features without lossy conversion.
+			if inboundType == InboundAnthropic && channel.Type == model.ChannelTypeAnthropic {
+				g.handleStreamPassthrough(c, resp, &channel, channelKey, requestModel, startTime, apiKeyID, attempts, group.FirstTokenTimeout)
+			} else {
+				g.handleStreamResponse(c, resp, inAdapter, outAdapter, &channel, channelKey, requestModel, startTime, apiKeyID, attempts, group.FirstTokenTimeout)
+			}
 		} else {
-			g.handleNonStreamResponse(c, resp, inAdapter, outAdapter, &channel, channelKey, requestModel, startTime, apiKeyID, attempts)
+			if inboundType == InboundAnthropic && channel.Type == model.ChannelTypeAnthropic {
+				g.handleNonStreamPassthrough(c, resp, &channel, channelKey, requestModel, startTime, apiKeyID, attempts)
+			} else {
+				g.handleNonStreamResponse(c, resp, inAdapter, outAdapter, &channel, channelKey, requestModel, startTime, apiKeyID, attempts)
+			}
 		}
 
 		return
@@ -254,6 +309,12 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 	if lastErr != nil {
 		errMsg = lastErr.Error()
 	}
+	log.Printf("[RELAY ERROR] model=%s attempts=%d error=%s", requestModel, attempts, errMsg)
+
+	// Save error audit log with request body for debugging
+	errChannel := &model.Channel{Name: "none"}
+	go g.saveAuditLog(nil, errChannel, requestModel, latencyMs, 0, apiKeyID, attempts, fmt.Errorf("%s", errMsg), body)
+
 	c.JSON(http.StatusBadGateway, gin.H{"error": errMsg})
 }
 
@@ -411,6 +472,105 @@ func (g *Gateway) handleStreamResponse(c *gin.Context, resp *http.Response, inAd
 	}
 }
 
+// handleStreamPassthrough relays SSE bytes directly from upstream to client
+// without parsing or transforming. Used when inbound and outbound share the same protocol.
+func (g *Gateway) handleStreamPassthrough(c *gin.Context, resp *http.Response, channel *model.Channel, key *model.ChannelKey, requestModel string, startTime time.Time, apiKeyID uint, attempts int, firstTokenTimeout int) {
+	defer resp.Body.Close()
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	metrics.ActiveConnections.Inc()
+	defer metrics.ActiveConnections.Dec()
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming not supported"})
+		return
+	}
+
+	buf := make([]byte, 32*1024)
+	firstByte := true
+	var firstTokenTime time.Time
+
+	var firstTokenTimer *time.Timer
+	var firstTokenC <-chan time.Time
+	if firstTokenTimeout > 0 {
+		firstTokenTimer = time.NewTimer(time.Duration(firstTokenTimeout) * time.Second)
+		firstTokenC = firstTokenTimer.C
+		defer func() {
+			if firstTokenTimer != nil {
+				firstTokenTimer.Stop()
+			}
+		}()
+	}
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-firstTokenC:
+			log.Printf("first token timeout (%ds) for channel %s", firstTokenTimeout, channel.Name)
+			return
+		default:
+		}
+
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			if firstByte {
+				firstByte = false
+				firstTokenTime = time.Now()
+				if firstTokenTimer != nil {
+					firstTokenTimer.Stop()
+					firstTokenTimer = nil
+					firstTokenC = nil
+				}
+				metrics.FirstTokenLatency.With(prometheus.Labels{"model": requestModel, "channel": channel.Name}).Observe(time.Since(startTime).Seconds())
+			}
+			c.Writer.Write(buf[:n])
+			flusher.Flush()
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	latencyMs := time.Since(startTime).Milliseconds()
+	var ftMs int64
+	if !firstTokenTime.IsZero() {
+		ftMs = firstTokenTime.Sub(startTime).Milliseconds()
+	}
+	metrics.RequestsTotal.With(prometheus.Labels{"model": requestModel, "channel": channel.Name, "status": "success"}).Inc()
+	metrics.RequestDuration.With(prometheus.Labels{"model": requestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
+	go g.saveAuditLog(nil, channel, requestModel, latencyMs, ftMs, apiKeyID, attempts, nil, nil)
+}
+
+// handleNonStreamPassthrough relays non-streaming response body directly.
+func (g *Gateway) handleNonStreamPassthrough(c *gin.Context, resp *http.Response, channel *model.Channel, key *model.ChannelKey, requestModel string, startTime time.Time, apiKeyID uint, attempts int) {
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read upstream response"})
+		return
+	}
+
+	latencyMs := time.Since(startTime).Milliseconds()
+	metrics.RequestsTotal.With(prometheus.Labels{"model": requestModel, "channel": channel.Name, "status": "success"}).Inc()
+	metrics.RequestDuration.With(prometheus.Labels{"model": requestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
+
+	// Copy relevant headers
+	for _, h := range []string{"Content-Type", "X-Request-Id"} {
+		if v := resp.Header.Get(h); v != "" {
+			c.Header(h, v)
+		}
+	}
+
+	go g.saveAuditLog(nil, channel, requestModel, latencyMs, 0, apiKeyID, attempts, nil, nil)
+	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
+}
+
 func (g *Gateway) recordMetrics(resp *types.InternalResponse, channel *model.Channel, requestModel string, latencyMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
 	metrics.RequestsTotal.With(prometheus.Labels{"model": requestModel, "channel": channel.Name, "status": "success"}).Inc()
 	metrics.RequestDuration.With(prometheus.Labels{"model": requestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
@@ -421,7 +581,7 @@ func (g *Gateway) recordMetrics(resp *types.InternalResponse, channel *model.Cha
 	}
 
 	// Save audit log asynchronously
-	go g.saveAuditLog(resp, channel, requestModel, latencyMs, 0, apiKeyID, attempts, nil)
+	go g.saveAuditLog(resp, channel, requestModel, latencyMs, 0, apiKeyID, attempts, nil, nil)
 }
 
 func (g *Gateway) recordStreamMetrics(inAdapter types.Inbound, channel *model.Channel, requestModel string, latencyMs, firstTokenMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
@@ -435,19 +595,19 @@ func (g *Gateway) recordStreamMetrics(inAdapter types.Inbound, channel *model.Ch
 		metrics.TokensTotal.With(prometheus.Labels{"model": requestModel, "direction": "output"}).Add(float64(resp.Usage.CompletionTokens))
 	}
 
-	go g.saveAuditLog(resp, channel, requestModel, latencyMs, firstTokenMs, apiKeyID, attempts, nil)
+	go g.saveAuditLog(resp, channel, requestModel, latencyMs, firstTokenMs, apiKeyID, attempts, nil, nil)
 }
 
-func (g *Gateway) saveAuditLog(resp *types.InternalResponse, channel *model.Channel, requestModel string, latencyMs, firstTokenMs int64, apiKeyID uint, attempts int, lastErr error) {
+func (g *Gateway) saveAuditLog(resp *types.InternalResponse, channel *model.Channel, requestModel string, latencyMs, firstTokenMs int64, apiKeyID uint, attempts int, lastErr error, reqBody []byte) {
 	audit := model.AuditLog{
-		APIKeyID:    apiKeyID,
-		Model:       requestModel,
-		ChannelID:   channel.ID,
-		ChannelName: channel.Name,
-		LatencyMs:   latencyMs,
+		APIKeyID:     apiKeyID,
+		Model:        requestModel,
+		ChannelID:    channel.ID,
+		ChannelName:  channel.Name,
+		LatencyMs:    latencyMs,
 		FirstTokenMs: firstTokenMs,
-		Attempts:    attempts,
-		Stream:      firstTokenMs > 0,
+		Attempts:     attempts,
+		Stream:       firstTokenMs > 0,
 	}
 
 	if resp != nil && resp.Usage != nil {
@@ -456,9 +616,131 @@ func (g *Gateway) saveAuditLog(resp *types.InternalResponse, channel *model.Chan
 	}
 	if lastErr != nil {
 		audit.Error = lastErr.Error()
+		// Store request body on error for debugging (truncate to 16KB)
+		if len(reqBody) > 0 {
+			if len(reqBody) > 16384 {
+				audit.RequestBody = string(reqBody[:16384]) + "\n...[truncated]"
+			} else {
+				audit.RequestBody = string(reqBody)
+			}
+		}
+		audit.ResponseBody = lastErr.Error()
 	}
 
 	g.db.Create(&audit)
+
+	// Update per-key token window for TPM enforcement
+	if audit.APIKeyID > 0 {
+		ratelimit.Global.RecordTokens(audit.APIKeyID, audit.InputTokens+audit.OutputTokens)
+	}
+
+	// Update aggregated stats tables
+	g.updateStats(&audit)
+
+	// Publish to SSE log stream
+	if g.logPublisher != nil {
+		g.logPublisher(&audit)
+	}
+}
+
+// updateStats updates all aggregated statistics tables based on an audit log entry.
+func (g *Gateway) updateStats(audit *model.AuditLog) {
+	now := time.Now()
+	today := now.Format("2006-01-02")
+	hour := now.Hour()
+
+	var failed int64
+	if audit.Error != "" {
+		failed = 1
+	}
+
+	// Calculate cost from model prices
+	var inputCost, outputCost float64
+	var price model.ModelPrice
+	if err := g.db.Where("model_name = ?", audit.Model).First(&price).Error; err == nil {
+		inputCost = float64(audit.InputTokens) * price.InputPrice / 1_000_000
+		outputCost = float64(audit.OutputTokens) * price.OutputPrice / 1_000_000
+		audit.Cost = inputCost + outputCost
+		g.db.Model(audit).Update("cost", audit.Cost)
+	}
+
+	// StatsDaily
+	g.db.Exec(`INSERT INTO stats_dailies (date, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms)
+		VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+		ON CONFLICT(date) DO UPDATE SET
+			input_tokens = input_tokens + ?,
+			output_tokens = output_tokens + ?,
+			input_cost = input_cost + ?,
+			output_cost = output_cost + ?,
+			total_requests = total_requests + 1,
+			failed_requests = failed_requests + ?,
+			total_latency_ms = total_latency_ms + ?`,
+		today, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs,
+		audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs)
+
+	// StatsHourly
+	g.db.Exec(`INSERT INTO stats_hourlies (hour, date, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms)
+		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+		ON CONFLICT(hour) DO UPDATE SET
+			date = ?,
+			input_tokens = CASE WHEN date = ? THEN input_tokens + ? ELSE ? END,
+			output_tokens = CASE WHEN date = ? THEN output_tokens + ? ELSE ? END,
+			input_cost = CASE WHEN date = ? THEN input_cost + ? ELSE ? END,
+			output_cost = CASE WHEN date = ? THEN output_cost + ? ELSE ? END,
+			total_requests = CASE WHEN date = ? THEN total_requests + 1 ELSE 1 END,
+			failed_requests = CASE WHEN date = ? THEN failed_requests + ? ELSE ? END,
+			total_latency_ms = CASE WHEN date = ? THEN total_latency_ms + ? ELSE ? END`,
+		hour, today, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs,
+		today,
+		today, audit.InputTokens, audit.InputTokens,
+		today, audit.OutputTokens, audit.OutputTokens,
+		today, inputCost, inputCost,
+		today, outputCost, outputCost,
+		today,
+		today, failed, failed,
+		today, audit.LatencyMs, audit.LatencyMs)
+
+	// StatsModel
+	g.db.Exec(`INSERT INTO stats_models (model_name, channel_id, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms)
+		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+		ON CONFLICT(model_name, channel_id) DO UPDATE SET
+			input_tokens = input_tokens + ?,
+			output_tokens = output_tokens + ?,
+			input_cost = input_cost + ?,
+			output_cost = output_cost + ?,
+			total_requests = total_requests + 1,
+			failed_requests = failed_requests + ?,
+			total_latency_ms = total_latency_ms + ?`,
+		audit.Model, audit.ChannelID, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs,
+		audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs)
+
+	// StatsChannel
+	g.db.Exec(`INSERT INTO stats_channels (channel_id, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms)
+		VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+		ON CONFLICT(channel_id) DO UPDATE SET
+			input_tokens = input_tokens + ?,
+			output_tokens = output_tokens + ?,
+			input_cost = input_cost + ?,
+			output_cost = output_cost + ?,
+			total_requests = total_requests + 1,
+			failed_requests = failed_requests + ?,
+			total_latency_ms = total_latency_ms + ?`,
+		audit.ChannelID, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs,
+		audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs)
+
+	// StatsAPIKey
+	g.db.Exec(`INSERT INTO stats_api_keys (api_key_id, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms)
+		VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+		ON CONFLICT(api_key_id) DO UPDATE SET
+			input_tokens = input_tokens + ?,
+			output_tokens = output_tokens + ?,
+			input_cost = input_cost + ?,
+			output_cost = output_cost + ?,
+			total_requests = total_requests + 1,
+			failed_requests = failed_requests + ?,
+			total_latency_ms = total_latency_ms + ?`,
+		audit.APIKeyID, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs,
+		audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs)
 }
 
 func (g *Gateway) findGroup(modelName string) (*model.Group, error) {
@@ -466,29 +748,7 @@ func (g *Gateway) findGroup(modelName string) (*model.Group, error) {
 	if err := g.db.Preload("Items").Where("name = ?", modelName).First(&group).Error; err == nil {
 		return &group, nil
 	}
-
-	// Regex match fallback
-	var groups []model.Group
-	g.db.Preload("Items").Where("match_regex != '' AND match_regex IS NOT NULL").Find(&groups)
-	for _, grp := range groups {
-		if grp.MatchRegex != "" && matchModel(grp.MatchRegex, modelName) {
-			return &grp, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no group found")
-}
-
-func matchModel(pattern, modelName string) bool {
-	// Simple glob-style matching: * matches anything
-	if pattern == "*" {
-		return true
-	}
-	if strings.Contains(pattern, "*") {
-		prefix := strings.TrimSuffix(pattern, "*")
-		return strings.HasPrefix(modelName, prefix)
-	}
-	return pattern == modelName
+	return nil, fmt.Errorf("no group found for model: %s", modelName)
 }
 
 func (g *Gateway) getInbound(t InboundType) types.Inbound {
@@ -587,6 +847,22 @@ func applyParamOverride(body []byte, override string) []byte {
 		bodyMap[k] = v
 	}
 	result, err := json.Marshal(bodyMap)
+	if err != nil {
+		return body
+	}
+	return result
+}
+
+// replaceModelInBody replaces only the "model" field in a JSON body,
+// preserving all other fields byte-for-byte via generic map round-trip.
+func replaceModelInBody(body []byte, newModel string) []byte {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	modelBytes, _ := json.Marshal(newModel)
+	m["model"] = modelBytes
+	result, err := json.Marshal(m)
 	if err != nil {
 		return body
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/liuguoyuan/llmux/internal/model"
+	"github.com/liuguoyuan/llmux/internal/ratelimit"
 	"gorm.io/gorm"
 )
 
@@ -61,6 +62,14 @@ func APIKeyAuth(db *gorm.DB, keyPrefix string) gin.HandlerFunc {
 			}
 		}
 
+		// Rate limiting: RPM and TPM
+		if keyObj.RPM > 0 || keyObj.TPM > 0 {
+			if ok, reason := ratelimit.Global.Allow(keyObj.ID, keyObj.RPM, keyObj.TPM); !ok {
+				c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": reason})
+				return
+			}
+		}
+
 		c.Set("api_key_id", keyObj.ID)
 		c.Set("api_key_rpm", keyObj.RPM)
 		c.Set("api_key_tpm", keyObj.TPM)
@@ -73,6 +82,10 @@ func APIKeyAuth(db *gorm.DB, keyPrefix string) gin.HandlerFunc {
 func JWTAuth(secret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := c.GetHeader("Authorization")
+		if token == "" {
+			// Fallback to query param (needed for SSE EventSource which can't set headers)
+			token = c.Query("token")
+		}
 		if token == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing token"})
 			return
