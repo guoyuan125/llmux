@@ -12,6 +12,7 @@ import (
 	"github.com/liuguoyuan/llmux/internal/config"
 	"github.com/liuguoyuan/llmux/internal/server"
 	"github.com/liuguoyuan/llmux/internal/store"
+	"github.com/liuguoyuan/llmux/internal/task"
 	"github.com/spf13/cobra"
 )
 
@@ -38,6 +39,11 @@ func runStart(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("failed to init database: %v", err)
 	}
+
+	// Start background tasks (seeds model prices, runs health checks)
+	runner := task.New(db)
+	runner.Start()
+	defer runner.Stop()
 
 	srv := server.New(cfg, db)
 	httpServer := &http.Server{
