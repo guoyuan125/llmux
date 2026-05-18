@@ -75,6 +75,7 @@ const (
 	InboundOpenAIChat InboundType = iota
 	InboundOpenAIResponses
 	InboundAnthropic
+	InboundOpenAIEmbedding
 )
 
 // HandleRelay is the main entry point for relay handlers.
@@ -118,6 +119,7 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 
 	requestModel := internalReq.Model
 	isStream := internalReq.Stream != nil && *internalReq.Stream
+	isEmbedding := inboundType == InboundOpenAIEmbedding
 
 	// Find group
 	group, err := g.findGroup(requestModel)
@@ -191,7 +193,12 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 		}
 
 		// Get outbound adapter
-		outAdapter := g.getOutbound(channel.Type)
+		var outAdapter types.Outbound
+		if isEmbedding {
+			outAdapter = g.getEmbeddingOutbound(channel.Type)
+		} else {
+			outAdapter = g.getOutbound(channel.Type)
+		}
 
 		var outReq *types.OutboundHTTPRequest
 
@@ -285,7 +292,9 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 		}
 
 		// Handle response
-		if isStream {
+		if isEmbedding {
+			g.handleEmbeddingPassthrough(c, resp, outAdapter, &channel, channelKey, requestModel, startTime, apiKeyID, attempts)
+		} else if isStream {
 			// When inbound and outbound are both Anthropic, raw passthrough preserves
 			// thinking blocks and other protocol-specific features without lossy conversion.
 			if inboundType == InboundAnthropic && channel.Type == model.ChannelTypeAnthropic {
@@ -781,6 +790,8 @@ func (g *Gateway) getInbound(t InboundType) types.Inbound {
 		return &inboundOpenAI.ChatInbound{}
 	case InboundAnthropic:
 		return &inboundAnthropic.MessagesInbound{}
+	case InboundOpenAIEmbedding:
+		return &inboundOpenAI.EmbedInbound{}
 	default:
 		return &inboundOpenAI.ChatInbound{}
 	}
@@ -795,6 +806,38 @@ func (g *Gateway) getOutbound(channelType model.ChannelType) types.Outbound {
 	default:
 		return &outboundOpenAI.ChatOutbound{}
 	}
+}
+
+// getEmbeddingOutbound returns an outbound adapter for embedding requests.
+// Only OpenAI-compatible channels are currently supported.
+func (g *Gateway) getEmbeddingOutbound(_ model.ChannelType) types.Outbound {
+	return &outboundOpenAI.EmbedOutbound{}
+}
+
+// handleEmbeddingPassthrough relays an embedding response body directly to the client,
+// extracting usage for audit logging without transforming the vector data.
+func (g *Gateway) handleEmbeddingPassthrough(c *gin.Context, resp *http.Response, outAdapter types.Outbound, channel *model.Channel, key *model.ChannelKey, requestModel string, startTime time.Time, apiKeyID uint, attempts int) {
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read upstream response"})
+		return
+	}
+
+	latencyMs := time.Since(startTime).Milliseconds()
+	metrics.RequestsTotal.With(prometheus.Labels{"model": requestModel, "channel": channel.Name, "status": "success"}).Inc()
+	metrics.RequestDuration.With(prometheus.Labels{"model": requestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
+
+	// Parse usage for audit log (best-effort)
+	ir, _ := outAdapter.TransformResponse(c.Request.Context(), resp.StatusCode, body)
+	go g.saveAuditLog(ir, channel, requestModel, latencyMs, 0, apiKeyID, attempts, nil, nil)
+
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	c.Data(http.StatusOK, contentType, body)
 }
 
 func (g *Gateway) getHTTPClient(proxy string) *http.Client {

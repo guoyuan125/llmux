@@ -24,8 +24,7 @@ func (h *Handler) RelayMessages(c *gin.Context) {
 
 // RelayEmbeddings proxies /v1/embeddings requests.
 func (h *Handler) RelayEmbeddings(c *gin.Context) {
-	// TODO: implement embedding relay
-	h.gateway.HandleRelay(c, relay.InboundOpenAIChat)
+	h.gateway.HandleRelay(c, relay.InboundOpenAIEmbedding)
 }
 
 // ListModels returns available models based on configured groups.
@@ -34,17 +33,19 @@ func (h *Handler) ListModels(c *gin.Context) {
 	h.db.Find(&groups)
 
 	type modelEntry struct {
-		ID      string `json:"id"`
-		Object  string `json:"object"`
-		OwnedBy string `json:"owned_by"`
+		ID          string `json:"id"`
+		Object      string `json:"object"`
+		OwnedBy     string `json:"owned_by"`
+		ContextSize int    `json:"context_size,omitempty"`
 	}
 
 	models := make([]modelEntry, 0, len(groups))
 	for _, g := range groups {
 		models = append(models, modelEntry{
-			ID:      g.Name,
-			Object:  "model",
-			OwnedBy: "llmux",
+			ID:          g.Name,
+			Object:      "model",
+			OwnedBy:     "llmux",
+			ContextSize: g.ContextSize,
 		})
 	}
 
