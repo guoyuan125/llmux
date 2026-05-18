@@ -3,11 +3,11 @@ package model
 // Group aggregates multiple channels under a unified model name.
 type Group struct {
 	ID                uint        `json:"id" gorm:"primaryKey"`
-	Name              string      `json:"name" gorm:"uniqueIndex;not null"` // exposed model name
+	Name              string      `json:"name" gorm:"uniqueIndex;not null"` // exposed model name (= group name, used as routing key)
 	Mode              GroupMode   `json:"mode" gorm:"not null"`
-	MatchRegex        string      `json:"match_regex"`         // regex for auto-matching model requests
-	FirstTokenTimeout int         `json:"first_token_timeout"` // seconds, 0 = disabled
-	SessionKeepTime   int         `json:"session_keep_time"`   // seconds, 0 = disabled
+	ContextSize       int         `json:"context_size"`          // max context window in tokens, reported via /v1/models
+	FirstTokenTimeout int         `json:"first_token_timeout"`   // seconds, 0 = disabled
+	SessionKeepTime   int         `json:"session_keep_time"`     // seconds, 0 = disabled
 	Items             []GroupItem `json:"items,omitempty" gorm:"foreignKey:GroupID"`
 }
 
@@ -31,4 +31,8 @@ type GroupItem struct {
 	ModelName string `json:"model_name" gorm:"uniqueIndex:idx_group_channel_model"` // actual model name to send upstream
 	Priority  int    `json:"priority"`
 	Weight    int    `json:"weight"`
+
+	// Runtime-only fields, not persisted. Populated by gateway before balancer call.
+	RuntimeLatencyMs int64   `json:"-" gorm:"-"` // measured TCP latency in ms, 0 = unknown
+	RuntimeCostTotal float64 `json:"-" gorm:"-"` // accumulated channel cost in USD
 }

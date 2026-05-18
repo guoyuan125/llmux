@@ -115,32 +115,41 @@ func (b *Weighted) Candidates(items []model.GroupItem) []model.GroupItem {
 }
 
 // LeastCost sorts by channel accumulated cost (lowest first).
-// Requires runtime cost data injection via SetCostData.
+// RuntimeCostTotal must be pre-populated by the caller.
 type LeastCost struct{}
 
 func (b *LeastCost) Candidates(items []model.GroupItem) []model.GroupItem {
-	// In v1, falls back to priority-based sorting.
-	// Cost data will be injected at runtime from StatsChannel.
 	if len(items) == 0 {
 		return nil
 	}
 	result := make([]model.GroupItem, len(items))
 	copy(result, items)
-	sort.Slice(result, func(i, j int) bool { return result[i].Priority < result[j].Priority })
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].RuntimeCostTotal < result[j].RuntimeCostTotal
+	})
 	return result
 }
 
 // LeastLatency sorts by measured endpoint latency (lowest first).
+// RuntimeLatencyMs must be pre-populated by the caller.
 type LeastLatency struct{}
 
 func (b *LeastLatency) Candidates(items []model.GroupItem) []model.GroupItem {
-	// In v1, falls back to priority-based sorting.
-	// Latency data will be injected at runtime from ChannelURL.Latency.
 	if len(items) == 0 {
 		return nil
 	}
 	result := make([]model.GroupItem, len(items))
 	copy(result, items)
-	sort.Slice(result, func(i, j int) bool { return result[i].Priority < result[j].Priority })
+	sort.Slice(result, func(i, j int) bool {
+		// Items with no latency data (0) sort last
+		li, lj := result[i].RuntimeLatencyMs, result[j].RuntimeLatencyMs
+		if li == 0 {
+			return false
+		}
+		if lj == 0 {
+			return true
+		}
+		return li < lj
+	})
 	return result
 }

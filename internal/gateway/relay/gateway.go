@@ -128,7 +128,11 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 
 	// Get candidates via balancer
 	b := balancer.Get(group.Mode)
-	candidates := b.Candidates(group.Items)
+	items := group.Items
+	if group.Mode == model.GroupModeLeastCost || group.Mode == model.GroupModeLeastLatency {
+		g.populateRuntimeData(items)
+	}
+	candidates := b.Candidates(items)
 	if len(candidates) == 0 {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available channels"})
 		return
@@ -749,6 +753,26 @@ func (g *Gateway) findGroup(modelName string) (*model.Group, error) {
 		return &group, nil
 	}
 	return nil, fmt.Errorf("no group found for model: %s", modelName)
+}
+
+// populateRuntimeData fills RuntimeLatencyMs and RuntimeCostTotal on each GroupItem
+// by querying ChannelURL latency and StatsChannel cost from the database.
+// Only called for LeastLatency and LeastCost modes to avoid unnecessary DB queries.
+func (g *Gateway) populateRuntimeData(items []model.GroupItem) {
+	for i := range items {
+		channelID := items[i].ChannelID
+
+		var url model.ChannelURL
+		if err := g.db.Where("channel_id = ? AND latency > 0", channelID).
+			Order("latency ASC").First(&url).Error; err == nil {
+			items[i].RuntimeLatencyMs = int64(url.Latency)
+		}
+
+		var stats model.StatsChannel
+		if err := g.db.Where("channel_id = ?", channelID).First(&stats).Error; err == nil {
+			items[i].RuntimeCostTotal = stats.InputCost + stats.OutputCost
+		}
+	}
 }
 
 func (g *Gateway) getInbound(t InboundType) types.Inbound {
