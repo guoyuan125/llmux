@@ -8,7 +8,7 @@ type APIKey struct {
 	Enabled         bool    `json:"enabled" gorm:"default:true"`
 	ExpireAt        int64   `json:"expire_at"`        // unix timestamp, 0 = never
 	MaxCost         float64 `json:"max_cost"`         // max total cost in USD, 0 = unlimited
-	RPM             int     `json:"rpm"`              // requests per minute, 0 = unlimited
-	TPM             int     `json:"tpm"`              // tokens per minute, 0 = unlimited
+	RPM             int     `json:"rpm_limit"`        // requests per minute, 0 = unlimited
+	TPM             int     `json:"tpm_limit"`        // tokens per minute, 0 = unlimited
 	SupportedModels string  `json:"supported_models"` // comma-separated model whitelist, empty = all
 }

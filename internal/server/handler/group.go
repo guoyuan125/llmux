@@ -5,9 +5,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/liuguoyuan/llmux/internal/model"
+	"gorm.io/gorm"
 )
 
-// ListGroups returns all groups with items.
+// ListGroups returns all groups with their items.
 func (h *Handler) ListGroups(c *gin.Context) {
 	var groups []model.Group
 	if err := h.db.Preload("Items").Find(&groups).Error; err != nil {
@@ -17,21 +18,21 @@ func (h *Handler) ListGroups(c *gin.Context) {
 	c.JSON(http.StatusOK, groups)
 }
 
-// CreateGroup creates a new group.
+// CreateGroup creates a new group and its nested Items.
 func (h *Handler) CreateGroup(c *gin.Context) {
 	var g model.Group
 	if err := c.ShouldBindJSON(&g); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := h.db.Create(&g).Error; err != nil {
+	if err := h.db.Session(&gorm.Session{FullSaveAssociations: true}).Create(&g).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusCreated, g)
 }
 
-// UpdateGroup updates an existing group.
+// UpdateGroup replaces an existing group's fields and Items.
 func (h *Handler) UpdateGroup(c *gin.Context) {
 	id := c.Param("id")
 	var g model.Group
@@ -46,17 +47,48 @@ func (h *Handler) UpdateGroup(c *gin.Context) {
 		return
 	}
 
-	if err := h.db.Model(&g).Updates(input).Error; err != nil {
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&g).Updates(map[string]interface{}{
+			"name":                input.Name,
+			"mode":                int(input.Mode),
+			"context_size":        input.ContextSize,
+			"first_token_timeout": input.FirstTokenTimeout,
+			"session_keep_time":   input.SessionKeepTime,
+		}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("group_id = ?", g.ID).Delete(&model.GroupItem{}).Error; err != nil {
+			return err
+		}
+		for i := range input.Items {
+			input.Items[i].ID = 0
+			input.Items[i].GroupID = g.ID
+		}
+		if len(input.Items) > 0 {
+			if err := tx.Create(&input.Items).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	h.db.Preload("Items").First(&g, g.ID)
 	c.JSON(http.StatusOK, g)
 }
 
-// DeleteGroup deletes a group.
+// DeleteGroup deletes a group and its nested Items.
 func (h *Handler) DeleteGroup(c *gin.Context) {
 	id := c.Param("id")
-	if err := h.db.Delete(&model.Group{}, id).Error; err != nil {
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("group_id = ?", id).Delete(&model.GroupItem{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&model.Group{}, id).Error
+	})
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

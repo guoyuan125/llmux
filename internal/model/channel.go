@@ -1,6 +1,11 @@
 package model
 
-import "time"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+)
 
 // Channel represents an upstream LLM provider connection.
 type Channel struct {
@@ -27,6 +32,39 @@ const (
 	ChannelTypeAnthropic ChannelType = 2
 	ChannelTypeGemini    ChannelType = 3
 )
+
+var channelTypeNames = map[ChannelType]string{
+	ChannelTypeOpenAI:    "openai",
+	ChannelTypeAnthropic: "anthropic",
+	ChannelTypeGemini:    "gemini",
+}
+
+var channelTypeByName = map[string]ChannelType{
+	"openai":    ChannelTypeOpenAI,
+	"anthropic": ChannelTypeAnthropic,
+	"gemini":    ChannelTypeGemini,
+}
+
+func (t ChannelType) MarshalJSON() ([]byte, error) {
+	if name, ok := channelTypeNames[t]; ok {
+		return []byte(`"` + name + `"`), nil
+	}
+	return []byte(strconv.Itoa(int(t))), nil
+}
+
+func (t *ChannelType) UnmarshalJSON(data []byte) error {
+	s := strings.Trim(string(data), `"`)
+	if ct, ok := channelTypeByName[s]; ok {
+		*t = ct
+		return nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return fmt.Errorf("unknown channel type: %s", s)
+	}
+	*t = ChannelType(n)
+	return nil
+}
 
 // ChannelURL is a base URL endpoint with measured latency.
 type ChannelURL struct {
