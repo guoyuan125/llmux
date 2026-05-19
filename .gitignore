@@ -5,8 +5,7 @@ llmux
 # Data
 data/
 
-# Frontend build output
-web/out/
+# Frontend build output (web/out is tracked — embedded into Go binary via embed.FS)
 web/node_modules/
 web/.next/
 
