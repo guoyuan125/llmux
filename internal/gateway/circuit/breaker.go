@@ -131,3 +131,57 @@ func (m *Manager) RecordFailure(key string) {
 func BreakerKey(channelID uint, keyID uint) string {
 	return fmt.Sprintf("%d:%d", channelID, keyID)
 }
+
+// ChannelKey returns the breaker key for a channel (keyID=0 for channel-level).
+func ChannelKey(channelID uint) string {
+	return fmt.Sprintf("%d:0", channelID)
+}
+
+// StatusEntry describes the real-time state of one circuit breaker.
+type StatusEntry struct {
+	Key         string    `json:"key"`
+	ChannelID   uint      `json:"channel_id"`
+	State       string    `json:"state"`    // "closed", "open", "half_open"
+	Failures    int       `json:"failures"`
+	Threshold   int       `json:"threshold"` // failures before opening
+	LastFailure time.Time `json:"last_failure"`
+	NextRetry   time.Time `json:"next_retry"` // zero if state != open
+}
+
+// Status returns a snapshot of all circuit breakers.
+func (m *Manager) Status() []StatusEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make([]StatusEntry, 0, len(m.breakers))
+	for k, b := range m.breakers {
+		b.mu.Lock()
+		var channelID uint
+		fmt.Sscanf(k, "%d:", &channelID) //nolint:errcheck
+
+		stateStr := "closed"
+		switch b.state {
+		case StateOpen:
+			stateStr = "open"
+		case StateHalfOpen:
+			stateStr = "half_open"
+		}
+
+		var nextRetry time.Time
+		if b.state == StateOpen {
+			nextRetry = b.lastFailure.Add(b.resetTimeout)
+		}
+
+		out = append(out, StatusEntry{
+			Key:         k,
+			ChannelID:   channelID,
+			State:       stateStr,
+			Failures:    b.failures,
+			Threshold:   b.threshold,
+			LastFailure: b.lastFailure,
+			NextRetry:   nextRetry,
+		})
+		b.mu.Unlock()
+	}
+	return out
+}

@@ -13,8 +13,19 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Plus, Pencil, Trash2 } from "lucide-react";
+import { Plus, Pencil, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
+
+interface ChannelURL {
+  url: string;
+}
+
+interface Channel {
+  id: number;
+  name: string;
+  type: number;
+  base_urls: ChannelURL[];
+}
 
 interface GroupItem {
   channel_id: number;
@@ -26,11 +37,22 @@ interface GroupItem {
 interface Group {
   id: number;
   name: string;
+  models: string;
   mode: string;
-  match_regex: string;
+  context_size: number;
   session_keep_time: number;
   first_token_timeout: number;
   items: GroupItem[];
+}
+
+interface CircuitEntry {
+  key: string;
+  channel_id: number;
+  state: "closed" | "open" | "half_open";
+  failures: number;
+  threshold: number;
+  last_failure: string;
+  next_retry: string;
 }
 
 const modes = [
@@ -42,19 +64,42 @@ const modes = [
   { value: "least_latency", label: "Least Latency" },
 ];
 
+const channelTypeLabel: Record<number, string> = {
+  1: "OpenAI",
+  2: "Anthropic",
+  3: "Gemini",
+};
+
+const emptyItem = (): GroupItem => ({ channel_id: 0, model_name: "", priority: 1, weight: 1 });
+
 export default function GroupsPage() {
   const [groups, setGroups] = useState<Group[]>([]);
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [circuitMap, setCircuitMap] = useState<Record<number, CircuitEntry>>({});
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Group | null>(null);
+  const [tick, setTick] = useState(0);
 
   const [form, setForm] = useState({
     name: "",
+    models: "",
     mode: "round_robin",
-    match_regex: "",
+    context_size: 0,
     session_keep_time: 0,
     first_token_timeout: 0,
   });
+  const [items, setItems] = useState<GroupItem[]>([emptyItem()]);
+
+  const fetchCircuit = () => {
+    api<CircuitEntry[]>("/api/circuit/status")
+      .then((entries) => {
+        const m: Record<number, CircuitEntry> = {};
+        for (const e of entries) m[e.channel_id] = e;
+        setCircuitMap(m);
+      })
+      .catch(() => {});
+  };
 
   const fetchGroups = () => {
     api<Group[]>("/api/groups")
@@ -63,16 +108,29 @@ export default function GroupsPage() {
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { fetchGroups(); }, []);
+  useEffect(() => {
+    fetchGroups();
+    api<Channel[]>("/api/channels").then(setChannels).catch(() => {});
+    fetchCircuit();
+    const timer = setInterval(fetchCircuit, 5000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   const resetForm = () => {
-    setForm({ name: "", mode: "round_robin", match_regex: "", session_keep_time: 0, first_token_timeout: 0 });
+    setForm({ name: "", models: "", mode: "round_robin", context_size: 0, session_keep_time: 0, first_token_timeout: 0 });
+    setItems([emptyItem()]);
     setEditing(null);
   };
 
   const handleSubmit = async () => {
+    const validItems = items.filter((it) => it.channel_id > 0 && it.model_name.trim());
     try {
-      const payload = { ...form };
+      const payload = { ...form, items: validItems };
       if (editing) {
         await api(`/api/groups/${editing.id}`, { method: "PUT", body: JSON.stringify(payload) });
         toast.success("Group updated");
@@ -103,13 +161,25 @@ export default function GroupsPage() {
     setEditing(g);
     setForm({
       name: g.name,
+      models: g.models || "",
       mode: g.mode,
-      match_regex: g.match_regex || "",
+      context_size: g.context_size || 0,
       session_keep_time: g.session_keep_time || 0,
       first_token_timeout: g.first_token_timeout || 0,
     });
+    setItems(g.items?.length ? g.items.map((it) => ({ ...it })) : [emptyItem()]);
     setDialogOpen(true);
   };
+
+  const updateItem = (idx: number, patch: Partial<GroupItem>) => {
+    setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+  };
+
+  const removeItem = (idx: number) => {
+    setItems((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const selectedChannel = (id: number) => channels.find((c) => c.id === id);
 
   return (
     <div className="space-y-6">
@@ -118,51 +188,206 @@ export default function GroupsPage() {
           <h1 className="text-2xl font-bold tracking-tight">Groups</h1>
           <p className="text-muted-foreground">Model routing groups with load balancing</p>
         </div>
-        <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
+        <Dialog key={editing?.id ?? 'new'} open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
           <DialogTrigger render={<Button />}>
             <Plus className="h-4 w-4 mr-2" />Add Group
           </DialogTrigger>
-          <DialogContent className="max-w-lg">
+
+          {/* sm:max-w-4xl overrides the sm:max-w-sm in DialogContent base styles */}
+          <DialogContent className="sm:max-w-4xl">
             <DialogHeader>
-              <DialogTitle>{editing ? "Edit Group" : "New Group"}</DialogTitle>
+              <DialogTitle className="text-lg">{editing ? "Edit Group" : "New Group"}</DialogTitle>
             </DialogHeader>
-            <div className="grid gap-4 py-4">
-              <div className="grid gap-2">
-                <Label>Name (model name clients request)</Label>
-                <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="gpt-4o" />
-              </div>
-              <div className="grid gap-2">
-                <Label>Balancing Mode</Label>
-                <select
-                  className="flex h-8 w-full rounded-lg border border-input bg-transparent px-3 py-1 text-sm transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-                  value={form.mode}
-                  onChange={(e) => setForm({ ...form, mode: e.target.value })}
-                >
-                  {modes.map((m) => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="grid gap-2">
-                <Label>Match Regex (optional, for wildcard routing)</Label>
-                <Input value={form.match_regex} onChange={(e) => setForm({ ...form, match_regex: e.target.value })} placeholder="gpt-4*" />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="grid gap-2">
-                  <Label>Session Keep (sec)</Label>
-                  <Input type="number" value={form.session_keep_time} onChange={(e) => setForm({ ...form, session_keep_time: parseInt(e.target.value) || 0 })} />
+
+            <div className="space-y-6 pt-2">
+              {/* Section: Basic Settings */}
+              <div className="space-y-4">
+                <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Basic Settings</h3>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="group-name">Group Name</Label>
+                    <Input
+                      id="group-name"
+                      value={form.name}
+                      onChange={(e) => setForm({ ...form, name: e.target.value })}
+                      placeholder="e.g. internal"
+                      className="h-9"
+                    />
+                    <p className="text-xs text-muted-foreground">Display name for management</p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="group-mode">Balancing Mode</Label>
+                    <select
+                      id="group-mode"
+                      className="flex h-9 w-full rounded-lg border border-input bg-transparent px-3 py-1 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      value={form.mode}
+                      onChange={(e) => setForm({ ...form, mode: e.target.value })}
+                    >
+                      {modes.map((m) => (
+                        <option key={m.value} value={m.value}>{m.label}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-muted-foreground">How to pick a channel when multiple are available</p>
+                  </div>
                 </div>
-                <div className="grid gap-2">
-                  <Label>First Token Timeout (sec)</Label>
-                  <Input type="number" value={form.first_token_timeout} onChange={(e) => setForm({ ...form, first_token_timeout: parseInt(e.target.value) || 0 })} />
+                <div className="space-y-2">
+                  <Label htmlFor="group-models">Accepted Models</Label>
+                  <Input
+                    id="group-models"
+                    value={form.models}
+                    onChange={(e) => setForm({ ...form, models: e.target.value })}
+                    placeholder="e.g. internal, claude-*, gpt-5.5"
+                    className="h-9"
+                  />
+                  <p className="text-xs text-muted-foreground">Comma-separated model names that route to this group. Supports * wildcard.</p>
+                </div>
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="ctx">Context Size (tokens)</Label>
+                    <Input
+                      id="ctx"
+                      type="number"
+                      value={form.context_size}
+                      onChange={(e) => setForm({ ...form, context_size: parseInt(e.target.value) || 0 })}
+                      className="h-9"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="skt">Session Keep (sec)</Label>
+                    <Input
+                      id="skt"
+                      type="number"
+                      value={form.session_keep_time}
+                      onChange={(e) => setForm({ ...form, session_keep_time: parseInt(e.target.value) || 0 })}
+                      className="h-9"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="ftt">First Token Timeout (sec)</Label>
+                    <Input
+                      id="ftt"
+                      type="number"
+                      value={form.first_token_timeout}
+                      onChange={(e) => setForm({ ...form, first_token_timeout: parseInt(e.target.value) || 0 })}
+                      className="h-9"
+                    />
+                  </div>
                 </div>
               </div>
-              <Button onClick={handleSubmit}>{editing ? "Update" : "Create"}</Button>
+
+              {/* Section: Channels */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Channels</h3>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Each entry maps this group to an upstream channel and model. Priority = failover order (lower = first).
+                    </p>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => setItems((prev) => [...prev, emptyItem()])}>
+                    <Plus className="h-3.5 w-3.5 mr-1.5" />Add Channel
+                  </Button>
+                </div>
+
+                <div className="max-h-[260px] overflow-y-auto space-y-3 pr-1">
+                  {items.map((it, idx) => {
+                    const ch = selectedChannel(it.channel_id);
+                    const baseUrl = ch?.base_urls?.[0]?.url ?? "";
+                    return (
+                      <div key={idx} className="rounded-lg border border-border bg-muted/20 p-4 space-y-3">
+                        {/* Item header */}
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-medium text-muted-foreground">Channel {idx + 1}</span>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                            onClick={() => removeItem(idx)}
+                            disabled={items.length === 1}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+
+                        {/* Row 1: channel select (full width) */}
+                        <div className="space-y-1.5">
+                          <Label className="text-xs">Channel</Label>
+                          <select
+                            className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            value={it.channel_id}
+                            onChange={(e) => updateItem(idx, { channel_id: parseInt(e.target.value) })}
+                          >
+                            <option value={0}>— select channel —</option>
+                            {channels.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}  ({c.base_urls?.[0]?.url ?? "no url"})
+                              </option>
+                            ))}
+                          </select>
+                          {/* show selected channel detail below */}
+                          {ch && (
+                            <div className="flex items-center gap-2 px-1">
+                              <Badge variant="secondary" className="text-xs">
+                                {channelTypeLabel[ch.type] ?? `type ${ch.type}`}
+                              </Badge>
+                              <span className="text-xs text-muted-foreground truncate">{baseUrl}</span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Row 2: model name + priority + weight */}
+                        <div className="grid grid-cols-[1fr_120px_120px] gap-3">
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">Upstream Model Name</Label>
+                            <Input
+                              placeholder="e.g. claude-sonnet-4-5"
+                              value={it.model_name}
+                              onChange={(e) => updateItem(idx, { model_name: e.target.value })}
+                              className="h-9"
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">Priority</Label>
+                            <Input
+                              type="number"
+                              min={1}
+                              value={it.priority}
+                              onChange={(e) => updateItem(idx, { priority: parseInt(e.target.value) || 1 })}
+                              className="h-9"
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">Weight</Label>
+                            <Input
+                              type="number"
+                              min={1}
+                              value={it.weight}
+                              onChange={(e) => updateItem(idx, { weight: parseInt(e.target.value) || 1 })}
+                              className="h-9"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {items.length === 0 && (
+                    <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
+                      No channels added. Click &ldquo;Add Channel&rdquo; above.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <Button onClick={handleSubmit} className="w-full h-10">
+                {editing ? "Update Group" : "Create Group"}
+              </Button>
             </div>
           </DialogContent>
         </Dialog>
       </div>
 
+      {/* Table */}
       <Card>
         <CardHeader><CardTitle>All Groups</CardTitle></CardHeader>
         <CardContent>
@@ -174,23 +399,82 @@ export default function GroupsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Mode</TableHead>
-                  <TableHead>Regex</TableHead>
+                  <TableHead className="w-[130px]">Name</TableHead>
+                  <TableHead className="w-[200px]">Accepted Models</TableHead>
+                  <TableHead className="w-[130px]">Mode</TableHead>
                   <TableHead>Channels</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
+                  <TableHead className="w-[90px] text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {groups.map((g) => (
                   <TableRow key={g.id}>
                     <TableCell className="font-medium">{g.name}</TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1">
+                        {(g.models || "").split(",").filter(Boolean).map((m, i) => (
+                          <Badge key={i} variant="outline" className="text-xs font-mono">{m.trim()}</Badge>
+                        ))}
+                      </div>
+                    </TableCell>
                     <TableCell><Badge variant="secondary">{g.mode}</Badge></TableCell>
-                    <TableCell className="text-muted-foreground text-xs">{g.match_regex || "-"}</TableCell>
-                    <TableCell>{g.items?.length || 0}</TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1.5">
+                        {g.items?.map((it, i) => {
+                          const ch = channels.find((c) => c.id === it.channel_id);
+                          const cb = circuitMap[it.channel_id];
+                          const cbState = cb?.state ?? "closed";
+                          return (
+                            <div key={i} className="flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs">
+                              <span className="text-muted-foreground font-mono">#{it.priority}</span>
+                              <span className="font-medium">{ch?.name ?? `#${it.channel_id}`}</span>
+                              <span className="text-muted-foreground">→</span>
+                              <span>{it.model_name}</span>
+                              {cbState === "closed" && (!cb || cb.failures === 0) && (
+                                <span className="inline-flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 inline-block" />
+                                  OK
+                                </span>
+                              )}
+                              {cbState === "closed" && cb && cb.failures > 0 && (
+                                <span className="inline-flex items-center gap-0.5 text-orange-500 dark:text-orange-400">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-orange-500 inline-block" />
+                                  {cb.failures} / {cb.threshold} fails
+                                </span>
+                              )}
+                              {cbState === "half_open" && (
+                                <span className="inline-flex items-center gap-0.5 text-amber-600 dark:text-amber-400">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-amber-500 inline-block" />
+                                  Testing
+                                </span>
+                              )}
+                              {cbState === "open" && (() => {
+                                void tick; // trigger re-render every second
+                                const secsLeft = cb?.next_retry
+                                  ? Math.max(0, Math.ceil((new Date(cb.next_retry).getTime() - Date.now()) / 1000))
+                                  : 0;
+                                return (
+                                  <span className="inline-flex items-center gap-0.5 text-destructive">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-destructive inline-block" />
+                                    熔断 · 剩余 {secsLeft}s
+                                  </span>
+                                );
+                              })()}
+                            </div>
+                          );
+                        })}
+                        {(!g.items || g.items.length === 0) && (
+                          <span className="text-muted-foreground text-xs">none</span>
+                        )}
+                      </div>
+                    </TableCell>
                     <TableCell className="text-right">
-                      <Button variant="ghost" size="icon" onClick={() => handleEdit(g)}><Pencil className="h-4 w-4" /></Button>
-                      <Button variant="ghost" size="icon" onClick={() => handleDelete(g.id)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                      <Button variant="ghost" size="icon" onClick={() => handleEdit(g)}>
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button variant="ghost" size="icon" onClick={() => handleDelete(g.id)}>
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}
