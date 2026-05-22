@@ -72,6 +72,37 @@ const channelTypeLabel: Record<number, string> = {
 
 const emptyItem = (): GroupItem => ({ channel_id: 0, model_name: "", priority: 1, weight: 1 });
 
+type ChannelStatus =
+  | { kind: "running" }
+  | { kind: "ready" }
+  | { kind: "tripped"; secsLeft: number }
+  | { kind: "testing" };
+
+function getChannelStatus(
+  items: GroupItem[],
+  idx: number,
+  circuitMap: Record<number, CircuitEntry>,
+  groupMode: string,
+  now: number
+): ChannelStatus {
+  const cb = circuitMap[items[idx].channel_id];
+  if (cb?.state === "open") {
+    const secsLeft = cb.next_retry
+      ? Math.max(0, Math.ceil((new Date(cb.next_retry).getTime() - now) / 1000))
+      : 0;
+    return { kind: "tripped", secsLeft };
+  }
+  if (cb?.state === "half_open") return { kind: "testing" };
+  // healthy (closed or no entry)
+  if (groupMode === "failover") {
+    const firstHealthyIdx = items.findIndex(
+      (it) => circuitMap[it.channel_id]?.state !== "open"
+    );
+    return idx === firstHealthyIdx ? { kind: "running" } : { kind: "ready" };
+  }
+  return { kind: "running" };
+}
+
 export default function GroupsPage() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -434,43 +465,36 @@ export default function GroupsPage() {
                       <div className="flex flex-wrap gap-1.5">
                         {g.items?.map((it, i) => {
                           const ch = channels.find((c) => c.id === it.channel_id);
-                          const cb = circuitMap[it.channel_id];
-                          const cbState = cb?.state ?? "closed";
+                          const status = getChannelStatus(g.items, i, circuitMap, g.mode, tick > 0 ? Date.now() : Date.now());
                           return (
                             <div key={i} className="flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs">
                               <span className="font-medium">{ch?.name ?? `#${it.channel_id}`}</span>
                               <span className="text-muted-foreground">→</span>
                               <span>{it.model_name}</span>
-                              {cbState === "closed" && (!cb || cb.failures === 0) && (
+                              {status.kind === "running" && (
                                 <span className="inline-flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400">
                                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 inline-block" />
-                                  OK
+                                  Running
                                 </span>
                               )}
-                              {cbState === "closed" && cb && cb.failures > 0 && (
-                                <span className="inline-flex items-center gap-0.5 text-orange-500 dark:text-orange-400">
-                                  <span className="h-1.5 w-1.5 rounded-full bg-orange-500 inline-block" />
-                                  {cb.failures} / {cb.threshold} fails
+                              {status.kind === "ready" && (
+                                <span className="inline-flex items-center gap-0.5 text-sky-600 dark:text-sky-400">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-sky-400 inline-block" />
+                                  Ready
                                 </span>
                               )}
-                              {cbState === "half_open" && (
+                              {status.kind === "testing" && (
                                 <span className="inline-flex items-center gap-0.5 text-amber-600 dark:text-amber-400">
                                   <span className="h-1.5 w-1.5 rounded-full bg-amber-500 inline-block" />
                                   Testing
                                 </span>
                               )}
-                              {cbState === "open" && (() => {
-                                void tick; // trigger re-render every second
-                                const secsLeft = cb?.next_retry
-                                  ? Math.max(0, Math.ceil((new Date(cb.next_retry).getTime() - Date.now()) / 1000))
-                                  : 0;
-                                return (
-                                  <span className="inline-flex items-center gap-0.5 text-destructive">
-                                    <span className="h-1.5 w-1.5 rounded-full bg-destructive inline-block" />
-                                    熔断 · 剩余 {secsLeft}s
-                                  </span>
-                                );
-                              })()}
+                              {status.kind === "tripped" && (
+                                <span className="inline-flex items-center gap-0.5 text-destructive">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-destructive inline-block" />
+                                  Tripped · {status.secsLeft}s
+                                </span>
+                              )}
                             </div>
                           );
                         })}
