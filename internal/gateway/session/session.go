@@ -55,6 +55,13 @@ func (s *Store) Set(apiKeyID uint, model string, channelID, keyID uint, ttl time
 	}
 }
 
+// Delete removes a session entry for the given API key and model.
+func (s *Store) Delete(apiKeyID uint, model string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.entries, sessionKey(apiKeyID, model))
+}
+
 func sessionKey(apiKeyID uint, model string) string {
 	return fmt.Sprintf("%d:%s", apiKeyID, model)
 }
