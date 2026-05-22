@@ -42,6 +42,11 @@ type Gateway struct {
 
 // NewGateway creates a new relay gateway.
 func NewGateway(db *gorm.DB) *Gateway {
+	return NewGatewayWithConfig(db, nil)
+}
+
+// NewGatewayWithConfig creates a new relay gateway with a custom circuit breaker config.
+func NewGatewayWithConfig(db *gorm.DB, cbCfg *circuit.Config) *Gateway {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
@@ -57,10 +62,15 @@ func NewGateway(db *gorm.DB) *Gateway {
 
 	return &Gateway{
 		db:       db,
-		circuit:  circuit.NewManager(nil),
+		circuit:  circuit.NewManager(cbCfg),
 		sessions: session.NewStore(),
 		client:   &http.Client{Transport: transport},
 	}
+}
+
+// CircuitStatus returns a real-time snapshot of all circuit breaker states.
+func (g *Gateway) CircuitStatus() []circuit.StatusEntry {
+	return g.circuit.Status()
 }
 
 // SetLogPublisher sets the callback invoked on each audit log creation.
@@ -71,6 +81,13 @@ func (g *Gateway) SetLogPublisher(fn func(log *model.AuditLog)) {
 // InboundType identifies the inbound protocol.
 type InboundType int
 
+// routeCtx carries routing metadata through the relay pipeline for audit logging.
+type routeCtx struct {
+	RequestModel  string // model name from client request
+	GroupName     string // matched group name
+	UpstreamModel string // actual model sent to upstream
+}
+
 const (
 	InboundOpenAIChat InboundType = iota
 	InboundOpenAIResponses
@@ -78,7 +95,25 @@ const (
 	InboundOpenAIEmbedding
 )
 
-// HandleRelay is the main entry point for relay handlers.
+// HandleRelay is the main entry point for all LLM API relay requests.
+//
+// It operates in three relay modes depending on inbound/outbound protocol match:
+//
+//  1. Same-protocol passthrough (e.g. Anthropic→Anthropic):
+//     The raw request body is forwarded to upstream with only the model name replaced.
+//     No parsing or transformation occurs. This preserves all protocol-specific features
+//     (thinking blocks, tool_calls ordering, reasoning_content, cache_control, signatures)
+//     without any lossy conversion. This is the preferred mode when the upstream provider
+//     offers a native-protocol endpoint (e.g. DeepSeek's /anthropic endpoint).
+//
+//  2. Cross-protocol transform (e.g. Anthropic→OpenAI, OpenAI→Anthropic):
+//     The request is fully parsed into an internal representation, then rebuilt in the
+//     target protocol format. This is inherently lossy — protocol-specific features may
+//     be dropped or reordered. Use only when no same-protocol endpoint is available.
+//
+//  3. Embedding passthrough:
+//     Embedding requests are forwarded with minimal transformation (model name only).
+//
 func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 	startTime := time.Now()
 	apiKeyID := c.GetUint("api_key_id")
@@ -143,7 +178,14 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 	// Session stickiness: move sticky channel to front
 	if group.SessionKeepTime > 0 {
 		if chID, _, ok := g.sessions.Get(apiKeyID, requestModel); ok {
-			candidates = moveToFront(candidates, chID)
+			reordered := moveToFront(candidates, chID)
+			if len(reordered) > 0 && reordered[0].ChannelID == chID {
+				candidates = reordered
+			} else {
+				// Sticky channel no longer in group; clear stale session.
+				log.Printf("[RELAY] sticky channel %d not in group %s, clearing session", chID, group.Name)
+				g.sessions.Delete(apiKeyID, requestModel)
+			}
 		}
 	}
 
@@ -188,11 +230,16 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 		}
 
 		// Set actual upstream model
+		upstreamModel := requestModel
 		if item.ModelName != "" && item.ModelName != "*" {
 			internalReq.Model = item.ModelName
+			upstreamModel = item.ModelName
 		}
+		rctx := routeCtx{RequestModel: requestModel, GroupName: group.Name, UpstreamModel: upstreamModel}
 
-		// Get outbound adapter
+		// Determine relay mode: same-protocol passthrough vs cross-protocol transform.
+		// Passthrough is strongly preferred — it avoids lossy format conversion that causes
+		// issues like tool_calls reordering, reasoning_content loss, and thinking block drops.
 		var outAdapter types.Outbound
 		if isEmbedding {
 			outAdapter = g.getEmbeddingOutbound(channel.Type)
@@ -202,18 +249,18 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 
 		var outReq *types.OutboundHTTPRequest
 
-		// For Anthropic→Anthropic, passthrough the raw request body with only model name replaced.
-		// This preserves thinking blocks, signatures, and other protocol-specific fields.
+		// Same-protocol passthrough: forward raw body with only model name replaced.
+		// Preserves all protocol features including thinking blocks, tool_calls ordering, etc.
 		if inboundType == InboundAnthropic && channel.Type == model.ChannelTypeAnthropic {
 			upstreamModel := item.ModelName
 			modifiedBody := replaceModelInBody(body, upstreamModel)
+			modifiedBody = stripEmptyThinkingBlocks(modifiedBody)
 			url := strings.TrimRight(baseURL, "/") + "/v1/messages"
 			headers := map[string]string{
 				"Content-Type":      "application/json",
 				"x-api-key":         channelKey.Key,
 				"anthropic-version": "2023-06-01",
 			}
-			// Forward client's anthropic-beta and anthropic-version headers
 			if v := c.GetHeader("anthropic-beta"); v != "" {
 				headers["anthropic-beta"] = v
 			}
@@ -226,13 +273,16 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 				Headers: headers,
 				Body:    modifiedBody,
 			}
+			log.Printf("[RELAY] model=%s channel=%s mode=passthrough stream=%v", requestModel, channel.Name, isStream)
 		} else {
-			// Build outbound request via transformer
+			// Cross-protocol transform: parse internal format and rebuild for target protocol.
 			outReq, err = outAdapter.TransformRequest(c.Request.Context(), internalReq, baseURL, channelKey.Key)
 			if err != nil {
 				lastErr = err
 				continue
 			}
+			log.Printf("[RELAY] model=%s channel=%s mode=transform(%s→%s) stream=%v",
+				requestModel, channel.Name, inboundTypeName(inboundType), channelTypeName(channel.Type), isStream)
 		}
 
 		// Apply param override
@@ -272,6 +322,8 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 			respBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			lastErr = fmt.Errorf("channel %s: upstream %d: %s", channel.Name, resp.StatusCode, string(respBody))
+			log.Printf("[RELAY] model=%s channel=%s upstream_error=%d body=%s",
+				requestModel, channel.Name, resp.StatusCode, truncate(string(respBody), 512))
 			g.circuit.RecordFailure(cbKey)
 
 			// Update key status
@@ -291,22 +343,22 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 			g.sessions.Set(apiKeyID, requestModel, channel.ID, channelKey.ID, time.Duration(group.SessionKeepTime)*time.Second)
 		}
 
-		// Handle response
+		// Dispatch response handler based on relay mode.
+		// Same-protocol → passthrough (preserves all protocol features).
+		// Cross-protocol → transform (parses and rebuilds in target format).
 		if isEmbedding {
-			g.handleEmbeddingPassthrough(c, resp, outAdapter, &channel, channelKey, requestModel, startTime, apiKeyID, attempts)
+			g.handleEmbeddingPassthrough(c, resp, outAdapter, &channel, channelKey, rctx, startTime, apiKeyID, attempts)
 		} else if isStream {
-			// When inbound and outbound are both Anthropic, raw passthrough preserves
-			// thinking blocks and other protocol-specific features without lossy conversion.
 			if inboundType == InboundAnthropic && channel.Type == model.ChannelTypeAnthropic {
-				g.handleStreamPassthrough(c, resp, &channel, channelKey, requestModel, startTime, apiKeyID, attempts, group.FirstTokenTimeout)
+				g.handleStreamPassthrough(c, resp, &channel, channelKey, rctx, startTime, apiKeyID, attempts, group.FirstTokenTimeout)
 			} else {
-				g.handleStreamResponse(c, resp, inAdapter, outAdapter, &channel, channelKey, requestModel, startTime, apiKeyID, attempts, group.FirstTokenTimeout)
+				g.handleStreamResponse(c, resp, inAdapter, outAdapter, &channel, channelKey, rctx, startTime, apiKeyID, attempts, group.FirstTokenTimeout)
 			}
 		} else {
 			if inboundType == InboundAnthropic && channel.Type == model.ChannelTypeAnthropic {
-				g.handleNonStreamPassthrough(c, resp, &channel, channelKey, requestModel, startTime, apiKeyID, attempts)
+				g.handleNonStreamPassthrough(c, resp, &channel, channelKey, rctx, startTime, apiKeyID, attempts)
 			} else {
-				g.handleNonStreamResponse(c, resp, inAdapter, outAdapter, &channel, channelKey, requestModel, startTime, apiKeyID, attempts)
+				g.handleNonStreamResponse(c, resp, inAdapter, outAdapter, &channel, channelKey, rctx, startTime, apiKeyID, attempts)
 			}
 		}
 
@@ -326,13 +378,13 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 
 	// Save error audit log with request body for debugging
 	errChannel := &model.Channel{Name: "none"}
-	go g.saveAuditLog(nil, errChannel, requestModel, latencyMs, 0, apiKeyID, attempts, fmt.Errorf("%s", errMsg), body)
+	go g.saveAuditLog(nil, errChannel, requestModel, group.Name, "", latencyMs, 0, apiKeyID, attempts, fmt.Errorf("%s", errMsg), body)
 
 	c.JSON(http.StatusBadGateway, gin.H{"error": errMsg})
 }
 
 // handleNonStreamResponse processes a non-streaming upstream response.
-func (g *Gateway) handleNonStreamResponse(c *gin.Context, resp *http.Response, inAdapter types.Inbound, outAdapter types.Outbound, channel *model.Channel, key *model.ChannelKey, requestModel string, startTime time.Time, apiKeyID uint, attempts int) {
+func (g *Gateway) handleNonStreamResponse(c *gin.Context, resp *http.Response, inAdapter types.Inbound, outAdapter types.Outbound, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, apiKeyID uint, attempts int) {
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
@@ -357,13 +409,13 @@ func (g *Gateway) handleNonStreamResponse(c *gin.Context, resp *http.Response, i
 
 	// Record metrics
 	latencyMs := time.Since(startTime).Milliseconds()
-	g.recordMetrics(internalResp, channel, requestModel, latencyMs, apiKeyID, attempts, key)
+	g.recordMetrics(internalResp, channel, rctx, latencyMs, apiKeyID, attempts, key)
 
 	c.Data(http.StatusOK, "application/json", clientBody)
 }
 
 // handleStreamResponse processes a streaming SSE upstream response.
-func (g *Gateway) handleStreamResponse(c *gin.Context, resp *http.Response, inAdapter types.Inbound, outAdapter types.Outbound, channel *model.Channel, key *model.ChannelKey, requestModel string, startTime time.Time, apiKeyID uint, attempts int, firstTokenTimeout int) {
+func (g *Gateway) handleStreamResponse(c *gin.Context, resp *http.Response, inAdapter types.Inbound, outAdapter types.Outbound, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, apiKeyID uint, attempts int, firstTokenTimeout int) {
 	defer resp.Body.Close()
 
 	// Set SSE headers
@@ -433,7 +485,7 @@ func (g *Gateway) handleStreamResponse(c *gin.Context, resp *http.Response, inAd
 				if !firstTokenTime.IsZero() {
 					ftMs = firstTokenTime.Sub(startTime).Milliseconds()
 				}
-				g.recordStreamMetrics(inAdapter, channel, requestModel, latencyMs, ftMs, apiKeyID, attempts, key)
+				g.recordStreamMetrics(inAdapter, channel, rctx, latencyMs, ftMs, apiKeyID, attempts, key)
 				return
 			}
 
@@ -465,7 +517,7 @@ func (g *Gateway) handleStreamResponse(c *gin.Context, resp *http.Response, inAd
 					firstTokenTimer = nil
 					firstTokenC = nil
 				}
-				metrics.FirstTokenLatency.With(prometheus.Labels{"model": requestModel, "channel": channel.Name}).Observe(time.Since(startTime).Seconds())
+				metrics.FirstTokenLatency.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name}).Observe(time.Since(startTime).Seconds())
 			}
 
 			// Write to client
@@ -478,16 +530,25 @@ func (g *Gateway) handleStreamResponse(c *gin.Context, resp *http.Response, inAd
 				if !firstTokenTime.IsZero() {
 					ftMs = firstTokenTime.Sub(startTime).Milliseconds()
 				}
-				g.recordStreamMetrics(inAdapter, channel, requestModel, latencyMs, ftMs, apiKeyID, attempts, key)
+				g.recordStreamMetrics(inAdapter, channel, rctx, latencyMs, ftMs, apiKeyID, attempts, key)
 				return
 			}
 		}
 	}
 }
 
-// handleStreamPassthrough relays SSE bytes directly from upstream to client
-// without parsing or transforming. Used when inbound and outbound share the same protocol.
-func (g *Gateway) handleStreamPassthrough(c *gin.Context, resp *http.Response, channel *model.Channel, key *model.ChannelKey, requestModel string, startTime time.Time, apiKeyID uint, attempts int, firstTokenTimeout int) {
+// handleStreamPassthrough relays SSE bytes directly from upstream to client without
+// parsing or transforming. Used for same-protocol relay (e.g. Anthropic→Anthropic) where
+// the upstream provider handles all protocol semantics natively.
+//
+// This avoids the lossy cross-protocol conversion that causes issues like:
+//   - tool_calls message ordering violations (DeepSeek requires tool immediately after assistant)
+//   - reasoning_content field loss (must be echoed back in multi-turn)
+//   - thinking block format differences between Anthropic and OpenAI
+//
+// Usage is extracted from SSE events (message_start, message_delta) for audit logging
+// without modifying the stream content.
+func (g *Gateway) handleStreamPassthrough(c *gin.Context, resp *http.Response, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, apiKeyID uint, attempts int, firstTokenTimeout int) {
 	defer resp.Body.Close()
 
 	c.Header("Content-Type", "text/event-stream")
@@ -504,9 +565,29 @@ func (g *Gateway) handleStreamPassthrough(c *gin.Context, resp *http.Response, c
 		return
 	}
 
-	buf := make([]byte, 32*1024)
-	firstByte := true
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
+
+	firstToken := true
 	var firstTokenTime time.Time
+	var usage types.Usage
+
+	type scanResult struct {
+		line string
+		err  error
+		done bool
+	}
+	results := make(chan scanResult, 1)
+
+	go func() {
+		for scanner.Scan() {
+			results <- scanResult{line: scanner.Text()}
+		}
+		if err := scanner.Err(); err != nil {
+			results <- scanResult{err: err}
+		}
+		results <- scanResult{done: true}
+	}()
 
 	var firstTokenTimer *time.Timer
 	var firstTokenC <-chan time.Time
@@ -527,27 +608,34 @@ func (g *Gateway) handleStreamPassthrough(c *gin.Context, resp *http.Response, c
 		case <-firstTokenC:
 			log.Printf("first token timeout (%ds) for channel %s", firstTokenTimeout, channel.Name)
 			return
-		default:
-		}
+		case r := <-results:
+			if r.done || r.err != nil {
+				break
+			}
 
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			if firstByte {
-				firstByte = false
+			line := r.line
+			// Write raw line back to client
+			c.Writer.Write([]byte(line + "\n"))
+			flusher.Flush()
+
+			if firstToken && strings.HasPrefix(line, "data: ") {
+				firstToken = false
 				firstTokenTime = time.Now()
 				if firstTokenTimer != nil {
 					firstTokenTimer.Stop()
 					firstTokenTimer = nil
 					firstTokenC = nil
 				}
-				metrics.FirstTokenLatency.With(prometheus.Labels{"model": requestModel, "channel": channel.Name}).Observe(time.Since(startTime).Seconds())
+				metrics.FirstTokenLatency.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name}).Observe(time.Since(startTime).Seconds())
 			}
-			c.Writer.Write(buf[:n])
-			flusher.Flush()
+
+			// Extract usage from SSE data lines
+			if strings.HasPrefix(line, "data: ") {
+				g.extractAnthropicUsage(line[6:], &usage)
+			}
+			continue
 		}
-		if err != nil {
-			break
-		}
+		break
 	}
 
 	latencyMs := time.Since(startTime).Milliseconds()
@@ -555,13 +643,54 @@ func (g *Gateway) handleStreamPassthrough(c *gin.Context, resp *http.Response, c
 	if !firstTokenTime.IsZero() {
 		ftMs = firstTokenTime.Sub(startTime).Milliseconds()
 	}
-	metrics.RequestsTotal.With(prometheus.Labels{"model": requestModel, "channel": channel.Name, "status": "success"}).Inc()
-	metrics.RequestDuration.With(prometheus.Labels{"model": requestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
-	go g.saveAuditLog(nil, channel, requestModel, latencyMs, ftMs, apiKeyID, attempts, nil, nil)
+	metrics.RequestsTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "status": "success"}).Inc()
+	metrics.RequestDuration.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
+
+	var resp2 *types.InternalResponse
+	if usage.PromptTokens > 0 || usage.CompletionTokens > 0 {
+		resp2 = &types.InternalResponse{Usage: &usage}
+	}
+	go g.saveAuditLog(resp2, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, ftMs, apiKeyID, attempts, nil, nil)
 }
 
-// handleNonStreamPassthrough relays non-streaming response body directly.
-func (g *Gateway) handleNonStreamPassthrough(c *gin.Context, resp *http.Response, channel *model.Channel, key *model.ChannelKey, requestModel string, startTime time.Time, apiKeyID uint, attempts int) {
+// extractAnthropicUsage parses usage fields from Anthropic SSE event data.
+func (g *Gateway) extractAnthropicUsage(data string, usage *types.Usage) {
+	var event struct {
+		Type    string `json:"type"`
+		Message *struct {
+			Usage struct {
+				InputTokens              int `json:"input_tokens"`
+				OutputTokens             int `json:"output_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			} `json:"usage"`
+		} `json:"message,omitempty"`
+		Usage *struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
+		return
+	}
+	switch event.Type {
+	case "message_start":
+		if event.Message != nil {
+			usage.PromptTokens = event.Message.Usage.InputTokens
+			usage.CacheReadTokens = event.Message.Usage.CacheReadInputTokens
+			usage.CacheWriteTokens = event.Message.Usage.CacheCreationInputTokens
+		}
+	case "message_delta":
+		if event.Usage != nil {
+			usage.CompletionTokens = event.Usage.OutputTokens
+		}
+	}
+}
+
+// handleNonStreamPassthrough relays non-streaming response body directly to the client.
+// Same rationale as handleStreamPassthrough — preserves protocol fidelity for same-protocol relay.
+// Extracts usage from the JSON response body for audit logging without modifying the payload.
+func (g *Gateway) handleNonStreamPassthrough(c *gin.Context, resp *http.Response, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, apiKeyID uint, attempts int) {
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -570,57 +699,76 @@ func (g *Gateway) handleNonStreamPassthrough(c *gin.Context, resp *http.Response
 	}
 
 	latencyMs := time.Since(startTime).Milliseconds()
-	metrics.RequestsTotal.With(prometheus.Labels{"model": requestModel, "channel": channel.Name, "status": "success"}).Inc()
-	metrics.RequestDuration.With(prometheus.Labels{"model": requestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
+	metrics.RequestsTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "status": "success"}).Inc()
+	metrics.RequestDuration.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
 
-	// Copy relevant headers
 	for _, h := range []string{"Content-Type", "X-Request-Id"} {
 		if v := resp.Header.Get(h); v != "" {
 			c.Header(h, v)
 		}
 	}
 
-	go g.saveAuditLog(nil, channel, requestModel, latencyMs, 0, apiKeyID, attempts, nil, nil)
+	var ir *types.InternalResponse
+	var respUsage struct {
+		Usage struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(body, &respUsage) == nil && (respUsage.Usage.InputTokens > 0 || respUsage.Usage.OutputTokens > 0) {
+		ir = &types.InternalResponse{Usage: &types.Usage{
+			PromptTokens:     respUsage.Usage.InputTokens,
+			CompletionTokens: respUsage.Usage.OutputTokens,
+			CacheReadTokens:  respUsage.Usage.CacheReadInputTokens,
+			CacheWriteTokens: respUsage.Usage.CacheCreationInputTokens,
+		}}
+	}
+
+	go g.saveAuditLog(ir, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, 0, apiKeyID, attempts, nil, nil)
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
 }
 
-func (g *Gateway) recordMetrics(resp *types.InternalResponse, channel *model.Channel, requestModel string, latencyMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
-	metrics.RequestsTotal.With(prometheus.Labels{"model": requestModel, "channel": channel.Name, "status": "success"}).Inc()
-	metrics.RequestDuration.With(prometheus.Labels{"model": requestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
+func (g *Gateway) recordMetrics(resp *types.InternalResponse, channel *model.Channel, rctx routeCtx, latencyMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
+	metrics.RequestsTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "status": "success"}).Inc()
+	metrics.RequestDuration.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
 
 	if resp != nil && resp.Usage != nil {
-		metrics.TokensTotal.With(prometheus.Labels{"model": requestModel, "direction": "input"}).Add(float64(resp.Usage.PromptTokens))
-		metrics.TokensTotal.With(prometheus.Labels{"model": requestModel, "direction": "output"}).Add(float64(resp.Usage.CompletionTokens))
+		metrics.TokensTotal.With(prometheus.Labels{"model": rctx.RequestModel, "direction": "input"}).Add(float64(resp.Usage.PromptTokens))
+		metrics.TokensTotal.With(prometheus.Labels{"model": rctx.RequestModel, "direction": "output"}).Add(float64(resp.Usage.CompletionTokens))
 	}
 
 	// Save audit log asynchronously
-	go g.saveAuditLog(resp, channel, requestModel, latencyMs, 0, apiKeyID, attempts, nil, nil)
+	go g.saveAuditLog(resp, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, 0, apiKeyID, attempts, nil, nil)
 }
 
-func (g *Gateway) recordStreamMetrics(inAdapter types.Inbound, channel *model.Channel, requestModel string, latencyMs, firstTokenMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
-	metrics.RequestsTotal.With(prometheus.Labels{"model": requestModel, "channel": channel.Name, "status": "success"}).Inc()
-	metrics.RequestDuration.With(prometheus.Labels{"model": requestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
+func (g *Gateway) recordStreamMetrics(inAdapter types.Inbound, channel *model.Channel, rctx routeCtx, latencyMs, firstTokenMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
+	metrics.RequestsTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "status": "success"}).Inc()
+	metrics.RequestDuration.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
 
 	// Get aggregated response for token counting
 	resp, _ := inAdapter.GetInternalResponse(context.Background())
 	if resp != nil && resp.Usage != nil {
-		metrics.TokensTotal.With(prometheus.Labels{"model": requestModel, "direction": "input"}).Add(float64(resp.Usage.PromptTokens))
-		metrics.TokensTotal.With(prometheus.Labels{"model": requestModel, "direction": "output"}).Add(float64(resp.Usage.CompletionTokens))
+		metrics.TokensTotal.With(prometheus.Labels{"model": rctx.RequestModel, "direction": "input"}).Add(float64(resp.Usage.PromptTokens))
+		metrics.TokensTotal.With(prometheus.Labels{"model": rctx.RequestModel, "direction": "output"}).Add(float64(resp.Usage.CompletionTokens))
 	}
 
-	go g.saveAuditLog(resp, channel, requestModel, latencyMs, firstTokenMs, apiKeyID, attempts, nil, nil)
+	go g.saveAuditLog(resp, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, firstTokenMs, apiKeyID, attempts, nil, nil)
 }
 
-func (g *Gateway) saveAuditLog(resp *types.InternalResponse, channel *model.Channel, requestModel string, latencyMs, firstTokenMs int64, apiKeyID uint, attempts int, lastErr error, reqBody []byte) {
+func (g *Gateway) saveAuditLog(resp *types.InternalResponse, channel *model.Channel, requestModel, groupName, upstreamModel string, latencyMs, firstTokenMs int64, apiKeyID uint, attempts int, lastErr error, reqBody []byte) {
 	audit := model.AuditLog{
-		APIKeyID:     apiKeyID,
-		Model:        requestModel,
-		ChannelID:    channel.ID,
-		ChannelName:  channel.Name,
-		LatencyMs:    latencyMs,
-		FirstTokenMs: firstTokenMs,
-		Attempts:     attempts,
-		Stream:       firstTokenMs > 0,
+		APIKeyID:      apiKeyID,
+		Model:         requestModel,
+		GroupName:     groupName,
+		UpstreamModel: upstreamModel,
+		ChannelID:     channel.ID,
+		ChannelName:   channel.Name,
+		LatencyMs:     latencyMs,
+		FirstTokenMs:  firstTokenMs,
+		Attempts:      attempts,
+		Stream:        firstTokenMs > 0,
 	}
 
 	if resp != nil && resp.Usage != nil {
@@ -670,7 +818,7 @@ func (g *Gateway) updateStats(audit *model.AuditLog) {
 	// Calculate cost from model prices
 	var inputCost, outputCost float64
 	var price model.ModelPrice
-	if err := g.db.Where("model_name = ?", audit.Model).First(&price).Error; err == nil {
+	if err := g.db.Where("model_name = ?", audit.UpstreamModel).First(&price).Error; err == nil {
 		inputCost = float64(audit.InputTokens) * price.InputPrice / 1_000_000
 		outputCost = float64(audit.OutputTokens) * price.OutputPrice / 1_000_000
 		audit.Cost = inputCost + outputCost
@@ -757,11 +905,56 @@ func (g *Gateway) updateStats(audit *model.AuditLog) {
 }
 
 func (g *Gateway) findGroup(modelName string) (*model.Group, error) {
-	var group model.Group
-	if err := g.db.Preload("Items").Where("name = ?", modelName).First(&group).Error; err == nil {
-		return &group, nil
+	var groups []model.Group
+	if err := g.db.Preload("Items").Find(&groups).Error; err != nil {
+		return nil, fmt.Errorf("no group found for model: %s", modelName)
+	}
+
+	var wildcardMatch *model.Group
+	for i := range groups {
+		for _, pattern := range strings.Split(groups[i].Models, ",") {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				continue
+			}
+			if pattern == modelName {
+				return &groups[i], nil
+			}
+			if wildcardMatch == nil && matchWildcard(pattern, modelName) {
+				wildcardMatch = &groups[i]
+			}
+		}
+	}
+	if wildcardMatch != nil {
+		return wildcardMatch, nil
 	}
 	return nil, fmt.Errorf("no group found for model: %s", modelName)
+}
+
+func matchWildcard(pattern, s string) bool {
+	if !strings.Contains(pattern, "*") {
+		return pattern == s
+	}
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 2 {
+		return strings.HasPrefix(s, parts[0]) && strings.HasSuffix(s, parts[1])
+	}
+	// General glob: each part must appear in order
+	remaining := s
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(remaining, part)
+		if idx < 0 {
+			return false
+		}
+		if i == 0 && idx != 0 {
+			return false
+		}
+		remaining = remaining[idx+len(part):]
+	}
+	return true
 }
 
 // populateRuntimeData fills RuntimeLatencyMs and RuntimeCostTotal on each GroupItem
@@ -816,7 +1009,7 @@ func (g *Gateway) getEmbeddingOutbound(_ model.ChannelType) types.Outbound {
 
 // handleEmbeddingPassthrough relays an embedding response body directly to the client,
 // extracting usage for audit logging without transforming the vector data.
-func (g *Gateway) handleEmbeddingPassthrough(c *gin.Context, resp *http.Response, outAdapter types.Outbound, channel *model.Channel, key *model.ChannelKey, requestModel string, startTime time.Time, apiKeyID uint, attempts int) {
+func (g *Gateway) handleEmbeddingPassthrough(c *gin.Context, resp *http.Response, outAdapter types.Outbound, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, apiKeyID uint, attempts int) {
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
@@ -826,12 +1019,12 @@ func (g *Gateway) handleEmbeddingPassthrough(c *gin.Context, resp *http.Response
 	}
 
 	latencyMs := time.Since(startTime).Milliseconds()
-	metrics.RequestsTotal.With(prometheus.Labels{"model": requestModel, "channel": channel.Name, "status": "success"}).Inc()
-	metrics.RequestDuration.With(prometheus.Labels{"model": requestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
+	metrics.RequestsTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "status": "success"}).Inc()
+	metrics.RequestDuration.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
 
 	// Parse usage for audit log (best-effort)
 	ir, _ := outAdapter.TransformResponse(c.Request.Context(), resp.StatusCode, body)
-	go g.saveAuditLog(ir, channel, requestModel, latencyMs, 0, apiKeyID, attempts, nil, nil)
+	go g.saveAuditLog(ir, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, 0, apiKeyID, attempts, nil, nil)
 
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
@@ -934,4 +1127,107 @@ func replaceModelInBody(body []byte, newModel string) []byte {
 		return body
 	}
 	return result
+}
+
+// stripEmptyThinkingBlocks removes thinking blocks with empty content from assistant messages.
+// DeepSeek's Anthropic endpoint requires thinking content to be passed back in full when
+// tool_calls are present, but Claude Code clients may send empty thinking blocks (thinking:"")
+// in multi-turn conversations. Stripping them avoids the 400 error while preserving all other
+// content. Thinking blocks with actual content are left intact.
+func stripEmptyThinkingBlocks(body []byte) []byte {
+	var req map[string]json.RawMessage
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body
+	}
+	messagesRaw, ok := req["messages"]
+	if !ok {
+		return body
+	}
+
+	var messages []map[string]interface{}
+	if err := json.Unmarshal(messagesRaw, &messages); err != nil {
+		return body
+	}
+
+	modified := false
+	for _, msg := range messages {
+		if msg["role"] != "assistant" {
+			continue
+		}
+		contentRaw, ok := msg["content"]
+		if !ok {
+			continue
+		}
+		blocks, ok := contentRaw.([]interface{})
+		if !ok {
+			continue
+		}
+		filtered := make([]interface{}, 0, len(blocks))
+		for _, b := range blocks {
+			block, ok := b.(map[string]interface{})
+			if !ok {
+				filtered = append(filtered, b)
+				continue
+			}
+			if block["type"] == "thinking" {
+				thinking, _ := block["thinking"].(string)
+				if thinking == "" {
+					modified = true
+					continue
+				}
+			}
+			filtered = append(filtered, block)
+		}
+		if len(filtered) != len(blocks) {
+			msg["content"] = filtered
+		}
+	}
+
+	if !modified {
+		return body
+	}
+
+	newMessages, err := json.Marshal(messages)
+	if err != nil {
+		return body
+	}
+	req["messages"] = newMessages
+	result, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return result
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "...[truncated]"
+}
+
+func inboundTypeName(t InboundType) string {
+	switch t {
+	case InboundOpenAIChat:
+		return "openai"
+	case InboundAnthropic:
+		return "anthropic"
+	case InboundOpenAIEmbedding:
+		return "embedding"
+	default:
+		return "unknown"
+	}
+}
+
+func channelTypeName(t model.ChannelType) string {
+	switch t {
+	case model.ChannelTypeOpenAI:
+		return "openai"
+	case model.ChannelTypeAnthropic:
+		return "anthropic"
+	case model.ChannelTypeGemini:
+		return "gemini"
+	default:
+		return "unknown"
+	}
 }
