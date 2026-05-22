@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Plus, Pencil, Trash2, X } from "lucide-react";
+import { Plus, Pencil, Trash2, X, ArrowUp, ArrowDown } from "lucide-react";
 import { toast } from "sonner";
 
 interface ChannelURL {
@@ -127,8 +127,20 @@ export default function GroupsPage() {
     setEditing(null);
   };
 
+  const moveItem = (idx: number, dir: -1 | 1) => {
+    const next = idx + dir;
+    if (next < 0 || next >= items.length) return;
+    setItems((prev) => {
+      const arr = [...prev];
+      [arr[idx], arr[next]] = [arr[next], arr[idx]];
+      return arr;
+    });
+  };
+
   const handleSubmit = async () => {
-    const validItems = items.filter((it) => it.channel_id > 0 && it.model_name.trim());
+    const validItems = items
+      .filter((it) => it.channel_id > 0 && it.model_name.trim())
+      .map((it, i) => ({ ...it, priority: i + 1, weight: it.weight || 1 }));
     try {
       const payload = { ...form, items: validItems };
       if (editing) {
@@ -236,10 +248,10 @@ export default function GroupsPage() {
                     id="group-models"
                     value={form.models}
                     onChange={(e) => setForm({ ...form, models: e.target.value })}
-                    placeholder="e.g. internal, claude-*, gpt-5.5"
+                    placeholder="e.g. internal, gpt-4o, claude-sonnet-4-5"
                     className="h-9"
                   />
-                  <p className="text-xs text-muted-foreground">Comma-separated model names that route to this group. Supports * wildcard.</p>
+                  <p className="text-xs text-muted-foreground">Comma-separated exact model names that route to this group.</p>
                 </div>
                 <div className="grid grid-cols-3 gap-4">
                   <div className="space-y-2">
@@ -281,7 +293,7 @@ export default function GroupsPage() {
                   <div>
                     <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Channels</h3>
                     <p className="text-xs text-muted-foreground mt-0.5">
-                      Each entry maps this group to an upstream channel and model. Priority = failover order (lower = first).
+                      Each entry maps this group to an upstream channel and model. List order determines priority (top = highest).
                     </p>
                   </div>
                   <Button variant="outline" size="sm" onClick={() => setItems((prev) => [...prev, emptyItem()])}>
@@ -298,15 +310,35 @@ export default function GroupsPage() {
                         {/* Item header */}
                         <div className="flex items-center justify-between">
                           <span className="text-xs font-medium text-muted-foreground">Channel {idx + 1}</span>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-6 w-6 text-muted-foreground hover:text-destructive"
-                            onClick={() => removeItem(idx)}
-                            disabled={items.length === 1}
-                          >
-                            <X className="h-3.5 w-3.5" />
-                          </Button>
+                          <div className="flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 text-muted-foreground"
+                              onClick={() => moveItem(idx, -1)}
+                              disabled={idx === 0}
+                            >
+                              <ArrowUp className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 text-muted-foreground"
+                              onClick={() => moveItem(idx, 1)}
+                              disabled={idx === items.length - 1}
+                            >
+                              <ArrowDown className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                              onClick={() => removeItem(idx)}
+                              disabled={items.length === 1}
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
                         </div>
 
                         {/* Row 1: channel select (full width) */}
@@ -335,34 +367,14 @@ export default function GroupsPage() {
                           )}
                         </div>
 
-                        {/* Row 2: model name + priority + weight */}
-                        <div className="grid grid-cols-[1fr_120px_120px] gap-3">
+                        {/* Row 2: model name only */}
+                        <div className="grid grid-cols-[1fr] gap-3">
                           <div className="space-y-1.5">
                             <Label className="text-xs">Upstream Model Name</Label>
                             <Input
                               placeholder="e.g. claude-sonnet-4-5"
                               value={it.model_name}
                               onChange={(e) => updateItem(idx, { model_name: e.target.value })}
-                              className="h-9"
-                            />
-                          </div>
-                          <div className="space-y-1.5">
-                            <Label className="text-xs">Priority</Label>
-                            <Input
-                              type="number"
-                              min={1}
-                              value={it.priority}
-                              onChange={(e) => updateItem(idx, { priority: parseInt(e.target.value) || 1 })}
-                              className="h-9"
-                            />
-                          </div>
-                          <div className="space-y-1.5">
-                            <Label className="text-xs">Weight</Label>
-                            <Input
-                              type="number"
-                              min={1}
-                              value={it.weight}
-                              onChange={(e) => updateItem(idx, { weight: parseInt(e.target.value) || 1 })}
                               className="h-9"
                             />
                           </div>
@@ -426,7 +438,6 @@ export default function GroupsPage() {
                           const cbState = cb?.state ?? "closed";
                           return (
                             <div key={i} className="flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs">
-                              <span className="text-muted-foreground font-mono">#{it.priority}</span>
                               <span className="font-medium">{ch?.name ?? `#${it.channel_id}`}</span>
                               <span className="text-muted-foreground">→</span>
                               <span>{it.model_name}</span>

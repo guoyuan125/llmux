@@ -909,52 +909,15 @@ func (g *Gateway) findGroup(modelName string) (*model.Group, error) {
 	if err := g.db.Preload("Items").Find(&groups).Error; err != nil {
 		return nil, fmt.Errorf("no group found for model: %s", modelName)
 	}
-
-	var wildcardMatch *model.Group
 	for i := range groups {
 		for _, pattern := range strings.Split(groups[i].Models, ",") {
 			pattern = strings.TrimSpace(pattern)
-			if pattern == "" {
-				continue
-			}
-			if pattern == modelName {
+			if pattern != "" && pattern == modelName {
 				return &groups[i], nil
 			}
-			if wildcardMatch == nil && matchWildcard(pattern, modelName) {
-				wildcardMatch = &groups[i]
-			}
 		}
-	}
-	if wildcardMatch != nil {
-		return wildcardMatch, nil
 	}
 	return nil, fmt.Errorf("no group found for model: %s", modelName)
-}
-
-func matchWildcard(pattern, s string) bool {
-	if !strings.Contains(pattern, "*") {
-		return pattern == s
-	}
-	parts := strings.Split(pattern, "*")
-	if len(parts) == 2 {
-		return strings.HasPrefix(s, parts[0]) && strings.HasSuffix(s, parts[1])
-	}
-	// General glob: each part must appear in order
-	remaining := s
-	for i, part := range parts {
-		if part == "" {
-			continue
-		}
-		idx := strings.Index(remaining, part)
-		if idx < 0 {
-			return false
-		}
-		if i == 0 && idx != 0 {
-			return false
-		}
-		remaining = remaining[idx+len(part):]
-	}
-	return true
 }
 
 // populateRuntimeData fills RuntimeLatencyMs and RuntimeCostTotal on each GroupItem

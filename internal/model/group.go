@@ -9,7 +9,8 @@ import (
 // Group aggregates multiple channels under a unified model name.
 type Group struct {
 	ID                uint        `json:"id" gorm:"primaryKey"`
-	Name              string      `json:"name" gorm:"uniqueIndex;not null"` // exposed model name (= group name, used as routing key)
+	Name              string      `json:"name" gorm:"uniqueIndex;not null"` // display name for management
+	Models            string      `json:"models"`                           // comma-separated exact model names accepted by this group, e.g. "internal,gpt-4o"
 	Mode              GroupMode   `json:"mode" gorm:"not null"`
 	ContextSize       int         `json:"context_size"`          // max context window in tokens, reported via /v1/models
 	FirstTokenTimeout int         `json:"first_token_timeout"`   // seconds, 0 = disabled

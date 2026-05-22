@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"strings"
+
 	"github.com/gin-gonic/gin"
 	"github.com/liuguoyuan/llmux/internal/gateway/relay"
 	"github.com/liuguoyuan/llmux/internal/model"
@@ -33,20 +35,28 @@ func (h *Handler) ListModels(c *gin.Context) {
 	h.db.Find(&groups)
 
 	type modelEntry struct {
-		ID          string `json:"id"`
-		Object      string `json:"object"`
-		OwnedBy     string `json:"owned_by"`
-		ContextSize int    `json:"context_size,omitempty"`
+		ID            string `json:"id"`
+		Object        string `json:"object"`
+		OwnedBy       string `json:"owned_by"`
+		ContextWindow int    `json:"context_window,omitempty"` // OpenAI spec field — read by Claude Code
+		ContextSize   int    `json:"context_size,omitempty"`   // legacy alias
 	}
 
-	models := make([]modelEntry, 0, len(groups))
+	models := make([]modelEntry, 0)
 	for _, g := range groups {
-		models = append(models, modelEntry{
-			ID:          g.Name,
-			Object:      "model",
-			OwnedBy:     "llmux",
-			ContextSize: g.ContextSize,
-		})
+		for _, m := range strings.Split(g.Models, ",") {
+			m = strings.TrimSpace(m)
+			if m == "" {
+				continue
+			}
+			models = append(models, modelEntry{
+				ID:            m,
+				Object:        "model",
+				OwnedBy:       "llmux",
+				ContextWindow: g.ContextSize,
+				ContextSize:   g.ContextSize,
+			})
+		}
 	}
 
 	c.JSON(200, gin.H{
