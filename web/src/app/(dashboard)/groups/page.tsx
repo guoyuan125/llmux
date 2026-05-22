@@ -443,7 +443,6 @@ export default function GroupsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-[130px]">Name</TableHead>
-                  <TableHead className="w-[200px]">Accepted Models</TableHead>
                   <TableHead className="w-[130px]">Mode</TableHead>
                   <TableHead>Channels</TableHead>
                   <TableHead className="w-[90px] text-right">Actions</TableHead>
@@ -451,23 +450,16 @@ export default function GroupsPage() {
               </TableHeader>
               <TableBody>
                 {groups.map((g) => (
-                  <TableRow key={g.id}>
-                    <TableCell className="font-medium">{g.name}</TableCell>
+                  <TableRow key={g.id} className="align-top">
+                    <TableCell className="font-medium pt-3">{g.name}</TableCell>
+                    <TableCell className="pt-3"><Badge variant="secondary">{g.mode}</Badge></TableCell>
                     <TableCell>
-                      <div className="flex flex-wrap gap-1">
-                        {(g.models || "").split(",").filter(Boolean).map((m, i) => (
-                          <Badge key={i} variant="outline" className="text-xs font-mono">{m.trim()}</Badge>
-                        ))}
-                      </div>
-                    </TableCell>
-                    <TableCell><Badge variant="secondary">{g.mode}</Badge></TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-1.5">
+                      <div className="flex flex-col gap-1.5 py-1">
                         {g.items?.map((it, i) => {
                           const ch = channels.find((c) => c.id === it.channel_id);
                           const status = getChannelStatus(g.items, i, circuitMap, g.mode, tick > 0 ? Date.now() : Date.now());
                           return (
-                            <div key={i} className="flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs">
+                            <div key={i} className="flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs w-fit">
                               <span className="font-medium">{ch?.name ?? `#${it.channel_id}`}</span>
                               <span className="text-muted-foreground">→</span>
                               <span>{it.model_name}</span>
@@ -503,7 +495,7 @@ export default function GroupsPage() {
                         )}
                       </div>
                     </TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className="text-right pt-2">
                       <Button variant="ghost" size="icon" onClick={() => handleEdit(g)}>
                         <Pencil className="h-4 w-4" />
                       </Button>
@@ -515,7 +507,7 @@ export default function GroupsPage() {
                 ))}
                 {groups.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={4} className="text-center text-muted-foreground py-8">
                       No groups yet. Create a group to start routing models.
                     </TableCell>
                   </TableRow>
