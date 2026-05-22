@@ -23,10 +23,14 @@
 
 ## Traceability
 
-| REQ-ID | Phase |
-|--------|-------|
-| CHN-01, CHN-02 | Phase 6 |
-| CHN-03, CHN-04, CHN-05 | Phase 7 |
-| CHN-06 | Phase 9 |
-| GRP-01, GRP-02 | Phase 8 |
-| GRP-03 | Phase 9 |
+| REQ-ID | Phase | Status |
+|--------|-------|--------|
+| CHN-01 | Phase 6 | Pending |
+| CHN-02 | Phase 6 | Pending |
+| CHN-03 | Phase 7 | Pending |
+| CHN-04 | Phase 7 | Pending |
+| CHN-05 | Phase 7 | Pending |
+| CHN-06 | Phase 9 | Pending |
+| GRP-01 | Phase 8 | Pending |
+| GRP-02 | Phase 8 | Pending |
+| GRP-03 | Phase 9 | Pending |
