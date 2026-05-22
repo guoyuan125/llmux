@@ -19,12 +19,21 @@ llmux 是一个本地运行的 LLM API 网关，支持 OpenAI / Anthropic / Gemi
 - ✓ Web 管理后台（Groups / Channels / Logs / Stats）— existing
 - ✓ Session stickiness — existing
 - ✓ 优雅重启（tableflip + SIGUSR2）— existing
+- ✓ Session stickiness bug 修复 — Milestone 1 Phase 1
+- ✓ Group channel 卡片熔断状态展示（threshold 字段、四态 badge、倒计时）— Milestone 1 Phase 2
+- ✓ Logs 页面 error 行红色背景 — Milestone 1 Phase 3
+- ✓ Group 配置简化（去掉 Priority/Weight 输入，列表顺序自动决定优先级）— Milestone 2 Phase 4
+- ✓ Accepted Models 精确匹配（去掉通配符）— Milestone 2 Phase 4
+- ✓ Channel 状态语义化（Running / Ready / Tripped / Testing）— Milestone 2 Phase 5
+- ✓ Groups 页面布局优化（Channels 列纵向排列，去掉 Accepted Models 列）— Milestone 2 Phase 5
 
 ### Active
 
-- [ ] Bug: Session stickiness 导致 channel 挪出分组后仍被路由（moveToFront 使用旧 channel ID，未校验该 channel 是否仍在当前 group 的 items 中）
-- [ ] 功能: Group 页面 channel 卡片增强 — 熔断剩余次数、熔断恢复倒计时（实时倒数）、服务状态颜色
-- [ ] 功能: Logs 页面增强 — error 行红色背景突出显示，展开查看格式化请求/响应全文
+- [ ] Channel 页面：每个 channel 展示已配模型列表，支持手动增删
+- [ ] Channel AutoSync：从上游拉取模型列表，选择性合并（不覆盖）到 CustomModels
+- [ ] Group 添加 item：model_name 从下拉框中选（来自 channel 的模型列表）
+- [ ] Channel 复制：一键复制 channel（含 base_urls、keys）
+- [ ] Group 复制：一键复制 group（含所有 items）
 
 ### Out of Scope
 
@@ -51,8 +60,18 @@ llmux 是一个本地运行的 LLM API 网关，支持 OpenAI / Anthropic / Gemi
 | Session stickiness 修复方式：在 moveToFront 后校验 channel 是否仍在 group items 中，不在则清除 session | 最小改动，不影响正常 stickiness 逻辑 | — Pending |
 | 熔断倒计时在前端实现（JS setInterval 每秒更新）| 后端已返回 next_retry 时间戳，无需新接口 | — Pending |
 
+## Current Milestone: v1.2 — Channel Model Management & Group UX
+
+**Goal:** Channel 成为模型管理中心，Group 配置引用 Channel 模型列表，消除手填错误。
+
+**Target features:**
+- Channel 展示和管理已配模型（利用现有 Models + CustomModels 字段）
+- AutoSync：从上游拉取模型列表，选择性合并（不覆盖已有）
+- Group 添加 item 时从 channel 模型下拉选，不再手填
+- Channel 和 Group 均支持一键复制
+
 ---
-*Last updated: 2026-05-22 after initialization*
+*Last updated: 2026-05-22 — Milestone v1.2 started*
 
 ## Evolution
 
