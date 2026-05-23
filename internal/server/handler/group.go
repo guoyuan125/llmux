@@ -50,6 +50,7 @@ func (h *Handler) UpdateGroup(c *gin.Context) {
 	err := h.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&g).Updates(map[string]interface{}{
 			"name":                input.Name,
+			"models":              input.Models,
 			"mode":                int(input.Mode),
 			"context_size":        input.ContextSize,
 			"first_token_timeout": input.FirstTokenTimeout,
@@ -77,6 +78,40 @@ func (h *Handler) UpdateGroup(c *gin.Context) {
 	}
 	h.db.Preload("Items").First(&g, g.ID)
 	c.JSON(http.StatusOK, g)
+}
+
+// DuplicateGroup copies an existing group (and its items) with name appended " (copy)".
+func (h *Handler) DuplicateGroup(c *gin.Context) {
+	id := c.Param("id")
+	var src model.Group
+	if err := h.db.Preload("Items").First(&src, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "group not found"})
+		return
+	}
+
+	newGroup := model.Group{
+		Name:               src.Name + " (copy)",
+		Models:             src.Models,
+		Mode:               src.Mode,
+		ContextSize:        src.ContextSize,
+		FirstTokenTimeout:  src.FirstTokenTimeout,
+		SessionKeepTime:    src.SessionKeepTime,
+	}
+	for _, it := range src.Items {
+		newGroup.Items = append(newGroup.Items, model.GroupItem{
+			ChannelID: it.ChannelID,
+			ModelName: it.ModelName,
+			Priority:  it.Priority,
+			Weight:    it.Weight,
+		})
+	}
+
+	if err := h.db.Session(&gorm.Session{FullSaveAssociations: true}).Create(&newGroup).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	h.db.Preload("Items").First(&newGroup, newGroup.ID)
+	c.JSON(http.StatusCreated, newGroup)
 }
 
 // DeleteGroup deletes a group and its nested Items.

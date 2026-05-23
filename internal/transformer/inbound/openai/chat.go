@@ -45,11 +45,12 @@ type streamOptions struct {
 }
 
 type openaiMessage struct {
-	Role       string      `json:"role"`
-	Content    interface{} `json:"content"` // string or array
-	Name       string      `json:"name,omitempty"`
-	ToolCalls  []openaiToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Role             string      `json:"role"`
+	Content          interface{} `json:"content"` // string or array
+	Name             string      `json:"name,omitempty"`
+	ToolCalls        []openaiToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string      `json:"tool_call_id,omitempty"`
+	ReasoningContent interface{} `json:"reasoning_content,omitempty"`
 }
 
 type openaiTool struct {
@@ -146,9 +147,10 @@ func (a *ChatInbound) TransformRequest(ctx context.Context, body []byte) (*types
 	// Convert messages
 	for _, msg := range req.Messages {
 		im := types.Message{
-			Role:       msg.Role,
-			Name:       msg.Name,
-			ToolCallID: msg.ToolCallID,
+			Role:             msg.Role,
+			Name:             msg.Name,
+			ToolCallID:       msg.ToolCallID,
+			ReasoningContent: msg.ReasoningContent,
 		}
 
 		// Content can be string or array of content blocks
@@ -401,10 +403,11 @@ func parseContentBlock(item interface{}) (types.ContentBlock, error) {
 
 func internalMsgToOpenAI(msg *types.Message) *openaiMessage {
 	om := &openaiMessage{
-		Role:       msg.Role,
-		Content:    msg.Content,
-		Name:       msg.Name,
-		ToolCallID: msg.ToolCallID,
+		Role:             msg.Role,
+		Content:          msg.Content,
+		Name:             msg.Name,
+		ToolCallID:       msg.ToolCallID,
+		ReasoningContent: msg.ReasoningContent,
 	}
 	for _, tc := range msg.ToolCalls {
 		om.ToolCalls = append(om.ToolCalls, openaiToolCall{

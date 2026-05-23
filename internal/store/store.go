@@ -49,6 +49,10 @@ func Init(cfg config.DatabaseConfig) (*gorm.DB, error) {
 		return nil, fmt.Errorf("failed to migrate: %w", err)
 	}
 
+	// Backfill: populate Group.Models from Name/Pattern for existing rows
+	db.Exec("UPDATE groups SET models = name WHERE models IS NULL OR models = ''")
+	db.Exec("UPDATE groups SET models = models || ',' || pattern WHERE pattern IS NOT NULL AND pattern != '' AND models NOT LIKE '%' || pattern || '%'")
+
 	return db, nil
 }
 

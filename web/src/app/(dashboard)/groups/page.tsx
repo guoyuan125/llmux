@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Plus, Pencil, Trash2, X, ArrowUp, ArrowDown } from "lucide-react";
+import { Plus, Pencil, Trash2, X, ArrowUp, ArrowDown, Copy } from "lucide-react";
 import { toast } from "sonner";
 
 interface ChannelURL {
@@ -25,6 +25,16 @@ interface Channel {
   name: string;
   type: number;
   base_urls: ChannelURL[];
+  models: string;
+  custom_models: string;
+}
+
+function channelModels(ch: Channel): string[] {
+  const parts = [
+    ...(ch.custom_models || "").split(","),
+    ...(ch.models || "").split(","),
+  ].map((s) => s.trim()).filter(Boolean);
+  return Array.from(new Set(parts));
 }
 
 interface GroupItem {
@@ -194,6 +204,16 @@ export default function GroupsPage() {
     try {
       await api(`/api/groups/${id}`, { method: "DELETE" });
       toast.success("Group deleted");
+      fetchGroups();
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Failed");
+    }
+  };
+
+  const handleDuplicate = async (g: Group) => {
+    try {
+      await api(`/api/groups/${g.id}/duplicate`, { method: "POST" });
+      toast.success("Group duplicated");
       fetchGroups();
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : "Failed");
@@ -378,7 +398,7 @@ export default function GroupsPage() {
                           <select
                             className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                             value={it.channel_id}
-                            onChange={(e) => updateItem(idx, { channel_id: parseInt(e.target.value) })}
+                            onChange={(e) => updateItem(idx, { channel_id: parseInt(e.target.value), model_name: "" })}
                           >
                             <option value={0}>— select channel —</option>
                             {channels.map((c) => (
@@ -398,17 +418,28 @@ export default function GroupsPage() {
                           )}
                         </div>
 
-                        {/* Row 2: model name only */}
-                        <div className="grid grid-cols-[1fr] gap-3">
-                          <div className="space-y-1.5">
-                            <Label className="text-xs">Upstream Model Name</Label>
+                        {/* Row 2: model name — dropdown if channel has models, text input otherwise */}
+                        <div className="space-y-1.5">
+                          <Label className="text-xs">Upstream Model Name</Label>
+                          {ch && channelModels(ch).length > 0 ? (
+                            <select
+                              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              value={it.model_name}
+                              onChange={(e) => updateItem(idx, { model_name: e.target.value })}
+                            >
+                              <option value="">— select model —</option>
+                              {channelModels(ch).map((m) => (
+                                <option key={m} value={m}>{m}</option>
+                              ))}
+                            </select>
+                          ) : (
                             <Input
                               placeholder="e.g. claude-sonnet-4-5"
                               value={it.model_name}
                               onChange={(e) => updateItem(idx, { model_name: e.target.value })}
                               className="h-9"
                             />
-                          </div>
+                          )}
                         </div>
                       </div>
                     );
@@ -454,12 +485,12 @@ export default function GroupsPage() {
                     <TableCell className="font-medium pt-3">{g.name}</TableCell>
                     <TableCell className="pt-3"><Badge variant="secondary">{g.mode}</Badge></TableCell>
                     <TableCell>
-                      <div className="flex flex-col gap-1.5 py-1">
+                      <div className="inline-flex flex-col gap-1.5 py-1 max-w-xs">
                         {g.items?.map((it, i) => {
                           const ch = channels.find((c) => c.id === it.channel_id);
                           const status = getChannelStatus(g.items, i, circuitMap, g.mode, tick > 0 ? Date.now() : Date.now());
                           return (
-                            <div key={i} className="flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs w-fit">
+                            <div key={i} className="flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs w-full">
                               <span className="font-medium">{ch?.name ?? `#${it.channel_id}`}</span>
                               <span className="text-muted-foreground">→</span>
                               <span>{it.model_name}</span>
@@ -496,6 +527,9 @@ export default function GroupsPage() {
                       </div>
                     </TableCell>
                     <TableCell className="text-right pt-2">
+                      <Button variant="ghost" size="icon" onClick={() => handleDuplicate(g)} title="Duplicate">
+                        <Copy className="h-4 w-4" />
+                      </Button>
                       <Button variant="ghost" size="icon" onClick={() => handleEdit(g)}>
                         <Pencil className="h-4 w-4" />
                       </Button>

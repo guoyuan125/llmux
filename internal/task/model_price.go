@@ -34,11 +34,20 @@ var knownPrices = []model.ModelPrice{
 	{ModelName: "claude-3-sonnet-20240229", InputPrice: 3.0, OutputPrice: 15.0, Source: "manual"},
 	{ModelName: "claude-3-haiku-20240307", InputPrice: 0.25, OutputPrice: 1.25, Source: "manual"},
 	{ModelName: "claude-opus-4-5", InputPrice: 15.0, OutputPrice: 75.0, Source: "manual"},
+	{ModelName: "claude-opus-4-6", InputPrice: 15.0, OutputPrice: 75.0, Source: "manual"},
 	{ModelName: "claude-sonnet-4-5", InputPrice: 3.0, OutputPrice: 15.0, Source: "manual"},
+	{ModelName: "claude-sonnet-4-6", InputPrice: 3.0, OutputPrice: 15.0, Source: "manual"},
 	// Google Gemini
 	{ModelName: "gemini-1.5-pro", InputPrice: 1.25, OutputPrice: 5.0, Source: "manual"},
 	{ModelName: "gemini-1.5-flash", InputPrice: 0.075, OutputPrice: 0.30, Source: "manual"},
 	{ModelName: "gemini-2.0-flash", InputPrice: 0.10, OutputPrice: 0.40, Source: "manual"},
+	// DeepSeek
+	{ModelName: "deepseek-v4-pro", InputPrice: 2.19, OutputPrice: 8.76, Source: "manual"},
+	{ModelName: "deepseek-v4-flash", InputPrice: 0.54, OutputPrice: 2.19, Source: "manual"},
+	// Zhipu GLM
+	{ModelName: "glm-5.1", InputPrice: 2.0, OutputPrice: 8.0, Source: "manual"},
+	// GPT-5.x
+	{ModelName: "gpt-5.5", InputPrice: 5.0, OutputPrice: 15.0, Source: "manual"},
 }
 
 // SeedModelPrices inserts well-known model prices if the ModelPrice table is empty.

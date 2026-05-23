@@ -2,7 +2,7 @@
 bin/
 llmux
 
-# Data
+# Data (contains real config with passwords and DB)
 data/
 
 # Frontend build output (web/out is tracked — embedded into Go binary via embed.FS)
@@ -16,6 +16,17 @@ web/.next/
 
 # OS
 .DS_Store
+*.pid
 
 # Environment
 .env
+
+# Planning / agent artifacts
+.planning/
+.baidu-cc/
+.playwright-mcp/
+
+# Temp screenshots and debug files
+*.png
+ctl.sh
+docs/

@@ -25,7 +25,9 @@ func (o *ChatOutbound) TransformRequest(ctx context.Context, req *types.Internal
 			"role": msg.Role,
 		}
 		if msg.Content != nil {
-			m["content"] = msg.Content
+			m["content"] = flattenContent(msg.Content)
+		} else {
+			m["content"] = nil
 		}
 		if msg.Name != "" {
 			m["name"] = msg.Name
@@ -47,9 +49,20 @@ func (o *ChatOutbound) TransformRequest(ctx context.Context, req *types.Internal
 			}
 			m["tool_calls"] = tcs
 		}
+		if msg.ReasoningContent != nil {
+			m["reasoning_content"] = msg.ReasoningContent
+		}
 		messages = append(messages, m)
 	}
-	oReq["messages"] = messages
+	sanitizeToolCalls(messages)
+	// Filter out nil entries from sanitization
+	cleaned := make([]map[string]interface{}, 0, len(messages))
+	for _, m := range messages {
+		if m != nil {
+			cleaned = append(cleaned, m)
+		}
+	}
+	oReq["messages"] = cleaned
 
 	// Optional parameters
 	if req.Stream != nil {
@@ -109,6 +122,58 @@ func (o *ChatOutbound) TransformRequest(ctx context.Context, req *types.Internal
 		},
 		Body: body,
 	}, nil
+}
+
+// flattenContent normalizes msg.Content for OpenAI-compatible providers.
+// If content is []types.ContentBlock containing only text blocks, it is
+// concatenated into a single string. Providers like DeepSeek reject the
+// array-of-objects format that Anthropic uses.
+func flattenContent(content interface{}) interface{} {
+	switch c := content.(type) {
+	case string:
+		return c
+	case []types.ContentBlock:
+		allText := true
+		for _, b := range c {
+			if b.Type != "text" && b.Type != "" {
+				allText = false
+				break
+			}
+		}
+		if allText {
+			var sb strings.Builder
+			for i, b := range c {
+				if i > 0 {
+					sb.WriteString("\n")
+				}
+				sb.WriteString(b.Text)
+			}
+			return sb.String()
+		}
+		// Contains images or other blocks — pass as OpenAI content_parts format
+		parts := make([]map[string]interface{}, 0, len(c))
+		for _, b := range c {
+			switch b.Type {
+			case "text", "":
+				parts = append(parts, map[string]interface{}{
+					"type": "text",
+					"text": b.Text,
+				})
+			case "image_url":
+				part := map[string]interface{}{"type": "image_url"}
+				if b.ImageURL != nil {
+					part["image_url"] = map[string]interface{}{"url": b.ImageURL.URL}
+				} else if b.Source != nil {
+					dataURI := "data:" + b.Source.MediaType + ";base64," + b.Source.Data
+					part["image_url"] = map[string]interface{}{"url": dataURI}
+				}
+				parts = append(parts, part)
+			}
+		}
+		return parts
+	default:
+		return content
+	}
 }
 
 // TransformResponse converts an OpenAI upstream response to internal format.
@@ -234,11 +299,12 @@ func (o *ChatOutbound) TransformStream(ctx context.Context, eventData []byte) (*
 // parseOpenAIMessage parses a raw JSON message into internal Message format.
 func parseOpenAIMessage(raw json.RawMessage) (*types.Message, error) {
 	var m struct {
-		Role       string      `json:"role"`
-		Content    interface{} `json:"content"`
-		Name       string      `json:"name,omitempty"`
-		ToolCallID string      `json:"tool_call_id,omitempty"`
-		ToolCalls  []struct {
+		Role             string      `json:"role"`
+		Content          interface{} `json:"content"`
+		Name             string      `json:"name,omitempty"`
+		ToolCallID       string      `json:"tool_call_id,omitempty"`
+		ReasoningContent interface{} `json:"reasoning_content,omitempty"`
+		ToolCalls        []struct {
 			ID       string `json:"id"`
 			Type     string `json:"type"`
 			Function struct {
@@ -254,10 +320,11 @@ func parseOpenAIMessage(raw json.RawMessage) (*types.Message, error) {
 	}
 
 	msg := &types.Message{
-		Role:       m.Role,
-		Content:    m.Content,
-		Name:       m.Name,
-		ToolCallID: m.ToolCallID,
+		Role:             m.Role,
+		Content:          m.Content,
+		Name:             m.Name,
+		ToolCallID:       m.ToolCallID,
+		ReasoningContent: m.ReasoningContent,
 	}
 
 	for _, tc := range m.ToolCalls {
@@ -272,4 +339,89 @@ func parseOpenAIMessage(raw json.RawMessage) (*types.Message, error) {
 	}
 
 	return msg, nil
+}
+
+// sanitizeToolCalls removes tool_calls from assistant messages that lack
+// corresponding tool responses, which some providers (e.g. DeepSeek) reject.
+// sanitizeToolCalls ensures tool_calls/tool message consistency for the OpenAI outbound path.
+//
+// This function is only relevant for cross-protocol relay (e.g. Anthropic→OpenAI) where
+// message structure differences can produce invalid sequences. Specifically:
+//
+//   - Anthropic allows user messages between tool_use and tool_result (e.g. system-reminders).
+//     After conversion to OpenAI format, this becomes assistant(tool_calls) → user → tool,
+//     which violates the OpenAI/DeepSeek requirement that tool messages immediately follow
+//     the assistant message with tool_calls.
+//
+//   - Anthropic conversations may include orphaned tool_calls (assistant declared tool_calls
+//     but the conversation was truncated before tool responses arrived).
+//
+// This function reorders messages so tool responses are placed immediately after their
+// corresponding assistant(tool_calls) message, and strips tool_calls that have no responses.
+//
+// NOTE: For same-protocol passthrough (Anthropic→Anthropic), this function is NOT called.
+// The passthrough path forwards the raw request body without any transformation, which is
+// the preferred approach when the upstream provider supports the client's native protocol.
+func sanitizeToolCalls(messages []map[string]interface{}) {
+	// Index tool response messages by tool_call_id
+	toolResps := make(map[string]map[string]interface{})
+	for _, m := range messages {
+		if m["role"] == "tool" {
+			if id, ok := m["tool_call_id"].(string); ok {
+				toolResps[id] = m
+			}
+		}
+	}
+
+	// Rebuild message list: for each assistant with tool_calls, place tool
+	// responses immediately after it; skip tool_calls without responses entirely.
+	result := make([]map[string]interface{}, 0, len(messages))
+	placed := make(map[string]bool) // tool messages already placed
+
+	for _, m := range messages {
+		if m["role"] == "tool" {
+			// Skip here; will be placed after their assistant message
+			continue
+		}
+
+		if m["role"] == "assistant" {
+			tcs, ok := m["tool_calls"].([]map[string]interface{})
+			if ok && len(tcs) > 0 {
+				// Check if all tool_calls have responses
+				allAnswered := true
+				for _, tc := range tcs {
+					id, _ := tc["id"].(string)
+					if _, exists := toolResps[id]; !exists {
+						allAnswered = false
+						break
+					}
+				}
+				if !allAnswered {
+					// Strip tool_calls, keep message as plain assistant
+					delete(m, "tool_calls")
+					if m["content"] == nil {
+						m["content"] = ""
+					}
+					result = append(result, m)
+				} else {
+					// Keep assistant with tool_calls, then place tool responses immediately after
+					result = append(result, m)
+					for _, tc := range tcs {
+						id, _ := tc["id"].(string)
+						result = append(result, toolResps[id])
+						placed[id] = true
+					}
+				}
+				continue
+			}
+		}
+
+		result = append(result, m)
+	}
+
+	// Copy result back into original slice
+	copy(messages, result)
+	for i := len(result); i < len(messages); i++ {
+		messages[i] = nil
+	}
 }

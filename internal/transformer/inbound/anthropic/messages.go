@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -139,13 +140,25 @@ func (a *MessagesInbound) TransformRequest(ctx context.Context, body []byte) (*t
 
 	// Convert messages
 	for _, msg := range req.Messages {
-		im := types.Message{Role: msg.Role}
-
 		switch c := msg.Content.(type) {
 		case string:
-			im.Content = c
+			ir.Messages = append(ir.Messages, types.Message{
+				Role:    msg.Role,
+				Content: c,
+			})
 		case []interface{}:
-			// Parse content blocks
+			// Parse content blocks. Anthropic packs tool_use, tool_result, text,
+			// and image blocks into a single message. OpenAI requires:
+			//   - tool_use blocks → single assistant message with tool_calls
+			//   - tool_result blocks → one role:"tool" message per result
+			//   - text/image blocks → one user/assistant message
+			var textParts []string
+			var contentBlocks []types.ContentBlock
+			var toolCalls []types.ToolCall
+			var toolResults []types.Message
+			var thinkingText string
+			hasNonText := false
+
 			for _, item := range c {
 				data, _ := json.Marshal(item)
 				var block anthropicContentBlock
@@ -153,13 +166,12 @@ func (a *MessagesInbound) TransformRequest(ctx context.Context, body []byte) (*t
 
 				switch block.Type {
 				case "tool_use":
-					// Convert to tool_call in internal format
 					args := ""
 					if block.Input != nil {
 						argsData, _ := json.Marshal(block.Input)
 						args = string(argsData)
 					}
-					im.ToolCalls = append(im.ToolCalls, types.ToolCall{
+					toolCalls = append(toolCalls, types.ToolCall{
 						ID:   block.ID,
 						Type: "function",
 						Function: types.ToolCallFunc{
@@ -168,31 +180,81 @@ func (a *MessagesInbound) TransformRequest(ctx context.Context, body []byte) (*t
 						},
 					})
 				case "tool_result":
-					// Represent as a tool message
-					im.Role = "tool"
-					im.ToolCallID = block.ToolUseID
-					if text, ok := block.Content.(string); ok {
-						im.Content = text
+					tm := types.Message{
+						Role:       "tool",
+						ToolCallID: block.ToolUseID,
 					}
+					if text, ok := block.Content.(string); ok {
+						tm.Content = text
+					} else if block.Content != nil {
+						// content can be array of content blocks
+						contentData, _ := json.Marshal(block.Content)
+						tm.Content = string(contentData)
+					} else {
+						tm.Content = ""
+					}
+					toolResults = append(toolResults, tm)
 				case "text":
-					im.Content = block.Text
+					textParts = append(textParts, block.Text)
+					contentBlocks = append(contentBlocks, types.ContentBlock{
+						Type: "text",
+						Text: block.Text,
+					})
+				case "thinking":
+					// Store thinking content to pass as reasoning_content
+					thinkingText = block.Thinking
 				case "image":
+					hasNonText = true
 					if block.Source != nil {
-						blocks := []types.ContentBlock{{
+						contentBlocks = append(contentBlocks, types.ContentBlock{
 							Type: "image_url",
 							Source: &types.ImageSource{
 								Type:      block.Source.Type,
 								MediaType: block.Source.MediaType,
 								Data:      block.Source.Data,
 							},
-						}}
-						im.Content = blocks
+						})
 					}
 				}
 			}
-		}
 
-		ir.Messages = append(ir.Messages, im)
+			// Emit assistant message with tool_calls (may also include text)
+			if len(toolCalls) > 0 {
+				am := types.Message{
+					Role:      "assistant",
+					ToolCalls: toolCalls,
+				}
+				if len(textParts) > 0 {
+					am.Content = strings.Join(textParts, "\n")
+				}
+				if thinkingText != "" {
+					am.ReasoningContent = thinkingText
+				}
+				ir.Messages = append(ir.Messages, am)
+			} else if len(contentBlocks) > 0 {
+				// Pure text/image message
+				im := types.Message{Role: msg.Role}
+				if hasNonText {
+					im.Content = contentBlocks
+				} else if len(textParts) > 0 {
+					im.Content = strings.Join(textParts, "\n")
+				}
+				if thinkingText != "" {
+					im.ReasoningContent = thinkingText
+				}
+				ir.Messages = append(ir.Messages, im)
+			} else if len(toolResults) == 0 {
+				// Empty message, still emit to preserve structure
+				ir.Messages = append(ir.Messages, types.Message{Role: msg.Role})
+			}
+
+			// Emit each tool_result as its own message
+			for _, tm := range toolResults {
+				ir.Messages = append(ir.Messages, tm)
+			}
+		default:
+			ir.Messages = append(ir.Messages, types.Message{Role: msg.Role})
+		}
 	}
 
 	// Convert tools
@@ -233,6 +295,15 @@ func (a *MessagesInbound) TransformResponse(ctx context.Context, resp *types.Int
 
 	for _, choice := range resp.Choices {
 		if choice.Message != nil {
+			// Convert reasoning_content to thinking block
+			if choice.Message.ReasoningContent != nil {
+				if text, ok := choice.Message.ReasoningContent.(string); ok && text != "" {
+					aResp.Content = append(aResp.Content, anthropicContentBlock{
+						Type:     "thinking",
+						Thinking: text,
+					})
+				}
+			}
 			// Convert content
 			if text, ok := choice.Message.Content.(string); ok && text != "" {
 				aResp.Content = append(aResp.Content, anthropicContentBlock{
@@ -286,6 +357,21 @@ func (a *MessagesInbound) TransformStream(ctx context.Context, resp *types.Inter
 	// For streaming, Anthropic uses different event types
 	for _, choice := range resp.Choices {
 		if choice.Delta != nil {
+			// Handle reasoning_content as thinking block
+			if choice.Delta.ReasoningContent != nil {
+				if text, ok := choice.Delta.ReasoningContent.(string); ok && text != "" {
+					event := map[string]interface{}{
+						"type":  "content_block_delta",
+						"index": 0,
+						"delta": map[string]interface{}{
+							"type":     "thinking_delta",
+							"thinking": text,
+						},
+					}
+					data, _ := json.Marshal(event)
+					return formatSSE("content_block_delta", data), nil
+				}
+			}
 			if text, ok := choice.Delta.Content.(string); ok && text != "" {
 				event := map[string]interface{}{
 					"type": "content_block_delta",

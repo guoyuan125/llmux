@@ -51,7 +51,9 @@ type AuditLog struct {
 	ID            uint      `json:"id" gorm:"primaryKey"`
 	RequestID     string    `json:"request_id" gorm:"index"`
 	APIKeyID      uint      `json:"api_key_id" gorm:"index"`
-	Model         string    `json:"model" gorm:"index"`
+	Model         string    `json:"model" gorm:"index"`          // client-requested model name
+	GroupName     string    `json:"group_name" gorm:"index"`     // matched group name
+	UpstreamModel string    `json:"upstream_model"`              // actual model sent to upstream
 	ChannelID     uint      `json:"channel_id"`
 	ChannelName   string    `json:"channel_name"`
 	StatusCode    int       `json:"status_code"`
@@ -62,7 +64,9 @@ type AuditLog struct {
 	FirstTokenMs  int64     `json:"first_token_ms"`
 	Stream        bool      `json:"stream"`
 	Error         string    `json:"error"`
-	Attempts      int       `json:"attempts"` // number of channels tried
+	RequestBody   string    `json:"request_body,omitempty" gorm:"type:text"`  // stored only on error
+	ResponseBody  string    `json:"response_body,omitempty" gorm:"type:text"` // stored only on error
+	Attempts      int       `json:"attempts"`
 	CreatedAt     time.Time `json:"created_at" gorm:"index"`
 }
 

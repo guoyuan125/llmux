@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Plus, Pencil, Trash2, X } from "lucide-react";
+import { Plus, Pencil, Trash2, X, RefreshCw, Copy } from "lucide-react";
 import { toast } from "sonner";
 
 interface Channel {
@@ -64,6 +64,12 @@ export default function ChannelsPage() {
 
   const [newModel, setNewModel] = useState("");
 
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncChannel, setSyncChannel] = useState<Channel | null>(null);
+  const [syncAvailable, setSyncAvailable] = useState<string[]>([]);
+  const [syncSelected, setSyncSelected] = useState<string[]>([]);
+  const [syncLoading, setSyncLoading] = useState(false);
+
   const fetchChannels = () => {
     api<Channel[]>("/api/channels")
       .then(setChannels)
@@ -88,6 +94,53 @@ export default function ChannelsPage() {
 
   const removeModel = (m: string) => {
     setForm((prev) => ({ ...prev, customModels: prev.customModels.filter((x) => x !== m) }));
+  };
+
+  const handleSync = async (ch: Channel) => {
+    setSyncChannel(ch);
+    setSyncAvailable([]);
+    setSyncSelected(
+      ch.custom_models
+        ? ch.custom_models.split(",").map((s) => s.trim()).filter(Boolean)
+        : []
+    );
+    setSyncOpen(true);
+    setSyncLoading(true);
+    try {
+      const data = await api<{ models: string[] }>(`/api/channels/${ch.id}/sync-models`);
+      setSyncAvailable(data.models || []);
+      // Keep pre-selection only for models that exist upstream
+      setSyncSelected((prev) =>
+        prev.filter((m) => (data.models || []).includes(m))
+      );
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Sync failed");
+      setSyncOpen(false);
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
+  const handleSyncSave = async () => {
+    if (!syncChannel) return;
+    try {
+      const payload = {
+        name: syncChannel.name,
+        type: syncChannel.type,
+        enabled: syncChannel.enabled,
+        base_urls: syncChannel.base_urls,
+        keys: syncChannel.keys,
+        proxy: syncChannel.proxy || "",
+        param_override: syncChannel.param_override || "",
+        custom_models: syncSelected.join(","),
+      };
+      await api(`/api/channels/${syncChannel.id}`, { method: "PUT", body: JSON.stringify(payload) });
+      toast.success("Models synced");
+      setSyncOpen(false);
+      fetchChannels();
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Save failed");
+    }
   };
 
   const handleSubmit = async () => {
@@ -118,11 +171,50 @@ export default function ChannelsPage() {
     }
   };
 
-  const handleDelete = async (id: number) => {
-    if (!confirm("Delete this channel?")) return;
+  const [deleteTarget, setDeleteTarget] = useState<Channel | null>(null);
+  const [deleteGroups, setDeleteGroups] = useState<string[]>([]);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+
+  const handleDelete = async (ch: Channel) => {
     try {
-      await api(`/api/channels/${id}`, { method: "DELETE" });
+      const data = await api<{ groups: string[] }>(`/api/channels/${ch.id}?check=true`, { method: "DELETE" });
+      setDeleteTarget(ch);
+      setDeleteGroups(data.groups || []);
+      setDeleteDialogOpen(true);
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Failed");
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    try {
+      await api(`/api/channels/${deleteTarget.id}`, { method: "DELETE" });
       toast.success("Channel deleted");
+      setDeleteDialogOpen(false);
+      setDeleteTarget(null);
+      fetchChannels();
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Failed");
+    }
+  };
+
+  const handleDuplicate = async (ch: Channel) => {
+    try {
+      await api("/api/channels", {
+        method: "POST",
+        body: JSON.stringify({
+          name: ch.name + " (copy)",
+          type: ch.type,
+          enabled: ch.enabled,
+          base_urls: ch.base_urls.map(({ url }) => ({ url })),
+          keys: ch.keys.map(({ key, enabled }) => ({ key, enabled })),
+          proxy: ch.proxy || "",
+          param_override: ch.param_override || "",
+          custom_models: ch.custom_models || "",
+        }),
+      });
+      toast.success("Channel duplicated");
       fetchChannels();
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : "Failed");
@@ -249,21 +341,23 @@ export default function ChannelsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Base URL</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Keys</TableHead>
+                  <TableHead className="w-36">Name</TableHead>
+                  <TableHead className="w-24">Type</TableHead>
+                  <TableHead className="w-40">Base URL</TableHead>
+                  <TableHead className="w-20">Status</TableHead>
+                  <TableHead className="w-12">Keys</TableHead>
                   <TableHead>Models</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
+                  <TableHead className="text-right w-36">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {channels.map((ch) => (
+                {channels.map((ch) => {
+                  const models = mergedModels(ch);
+                  return (
                   <TableRow key={ch.id}>
-                    <TableCell className="font-medium">{ch.name}</TableCell>
+                    <TableCell className="font-medium max-w-36 truncate">{ch.name}</TableCell>
                     <TableCell><Badge variant="secondary">{ch.type}</Badge></TableCell>
-                    <TableCell className="text-muted-foreground text-xs max-w-48 truncate">
+                    <TableCell className="text-muted-foreground text-xs w-40 max-w-40 truncate">
                       {ch.base_urls?.[0]?.url || "-"}
                     </TableCell>
                     <TableCell>
@@ -272,29 +366,43 @@ export default function ChannelsPage() {
                       </Badge>
                     </TableCell>
                     <TableCell>{ch.keys?.length || 0}</TableCell>
-                    <TableCell>
+                    <TableCell className="max-w-48">
                       <div className="flex flex-wrap gap-1">
-                        {mergedModels(ch).length > 0 ? (
-                          mergedModels(ch).map((m) => (
-                            <Badge key={m} variant="outline" className="text-xs font-mono">
-                              {m}
-                            </Badge>
-                          ))
+                        {models.length > 0 ? (
+                          <>
+                            {models.slice(0, 2).map((m) => (
+                              <Badge key={m} variant="outline" className="text-xs font-mono max-w-32 truncate">
+                                {m}
+                              </Badge>
+                            ))}
+                            {models.length > 2 && (
+                              <Badge variant="outline" className="text-xs text-muted-foreground">
+                                +{models.length - 2}
+                              </Badge>
+                            )}
+                          </>
                         ) : (
                           <span className="text-xs text-muted-foreground">No models</span>
                         )}
                       </div>
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button variant="ghost" size="icon" onClick={() => handleEdit(ch)}>
+                      <Button variant="ghost" size="icon" onClick={() => handleSync(ch)} title="Sync models">
+                        <RefreshCw className="h-4 w-4" />
+                      </Button>
+                      <Button variant="ghost" size="icon" onClick={() => handleDuplicate(ch)} title="Duplicate">
+                        <Copy className="h-4 w-4" />
+                      </Button>
+                      <Button variant="ghost" size="icon" onClick={() => handleEdit(ch)} title="Edit">
                         <Pencil className="h-4 w-4" />
                       </Button>
-                      <Button variant="ghost" size="icon" onClick={() => handleDelete(ch.id)}>
+                      <Button variant="ghost" size="icon" onClick={() => handleDelete(ch)} title="Delete">
                         <Trash2 className="h-4 w-4 text-destructive" />
                       </Button>
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
                 {channels.length === 0 && (
                   <TableRow>
                     <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
@@ -307,6 +415,80 @@ export default function ChannelsPage() {
           )}
         </CardContent>
       </Card>
+
+      <Dialog open={deleteDialogOpen} onOpenChange={(open) => { setDeleteDialogOpen(open); if (!open) setDeleteTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete Channel</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            {deleteGroups.length > 0 ? (
+              <>
+                <p className="text-sm">
+                  <span className="font-medium text-destructive">{deleteTarget?.name}</span> is used in the following group{deleteGroups.length > 1 ? "s" : ""}:
+                </p>
+                <ul className="text-sm space-y-1 pl-4">
+                  {deleteGroups.map((g) => (
+                    <li key={g} className="list-disc text-muted-foreground font-mono">{g}</li>
+                  ))}
+                </ul>
+                <p className="text-sm text-muted-foreground">Deleting will also remove it from the above group{deleteGroups.length > 1 ? "s" : ""}.</p>
+              </>
+            ) : (
+              <p className="text-sm">Delete channel <span className="font-medium">{deleteTarget?.name}</span>? This cannot be undone.</p>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="outline" size="sm" onClick={() => setDeleteDialogOpen(false)}>Cancel</Button>
+              <Button variant="destructive" size="sm" onClick={confirmDelete}>Delete</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={syncOpen} onOpenChange={setSyncOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Sync Models — {syncChannel?.name}</DialogTitle>
+          </DialogHeader>
+          {syncLoading ? (
+            <div className="space-y-2 py-4">
+              {[1, 2, 3].map((i) => <div key={i} className="h-8 rounded bg-muted animate-pulse" />)}
+            </div>
+          ) : (
+            <div className="space-y-4 py-2">
+              {syncAvailable.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No models returned from upstream.</p>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {syncAvailable.map((m) => (
+                    <label key={m} className="flex items-center gap-2 cursor-pointer text-sm font-mono">
+                      <input
+                        type="checkbox"
+                        checked={syncSelected.includes(m)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSyncSelected((prev) => [...prev, m]);
+                          } else {
+                            setSyncSelected((prev) => prev.filter((x) => x !== m));
+                          }
+                        }}
+                        className="h-4 w-4"
+                      />
+                      {m}
+                    </label>
+                  ))}
+                </div>
+              )}
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="outline" size="sm" onClick={() => setSyncOpen(false)}>Cancel</Button>
+                <Button size="sm" onClick={handleSyncSave} disabled={syncAvailable.length === 0}>
+                  Save ({syncSelected.length} selected)
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

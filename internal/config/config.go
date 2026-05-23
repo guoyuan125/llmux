@@ -13,6 +13,7 @@ type Config struct {
 	Log      LogConfig      `yaml:"log"`
 	Auth     AuthConfig     `yaml:"auth"`
 	Metrics  MetricsConfig  `yaml:"metrics"`
+	Circuit  CircuitConfig  `yaml:"circuit"`
 }
 
 type ServerConfig struct {
@@ -30,7 +31,8 @@ type DatabaseConfig struct {
 }
 
 type LogConfig struct {
-	Level string `yaml:"level"` // debug, info, warn, error
+	Level              string `yaml:"level"`               // debug, info, warn, error
+	AuditRetentionDays int    `yaml:"audit_retention_days"` // days to keep audit_logs; 0 = keep forever; default 30
 }
 
 type AuthConfig struct {
@@ -42,6 +44,12 @@ type AuthConfig struct {
 
 type MetricsConfig struct {
 	Enabled bool `yaml:"enabled"`
+}
+
+// CircuitConfig holds circuit breaker tuning parameters.
+type CircuitConfig struct {
+	Threshold       int `yaml:"threshold"`        // consecutive failures before opening; default 3
+	ResetTimeoutSec int `yaml:"reset_timeout_sec"` // seconds in Open state before half-open retry; default 30
 }
 
 func Load(path string) (*Config, error) {
@@ -76,7 +84,8 @@ func defaultConfig() *Config {
 			Path: "data/data.db",
 		},
 		Log: LogConfig{
-			Level: "info",
+			Level:              "info",
+			AuditRetentionDays: 30,
 		},
 		Auth: AuthConfig{
 			AdminUser: "admin",
@@ -85,6 +94,10 @@ func defaultConfig() *Config {
 		},
 		Metrics: MetricsConfig{
 			Enabled: true,
+		},
+		Circuit: CircuitConfig{
+			Threshold:       3,
+			ResetTimeoutSec: 30,
 		},
 	}
 }

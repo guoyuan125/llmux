@@ -30,11 +30,12 @@ type InternalRequest struct {
 
 // Message represents a single message in the conversation.
 type Message struct {
-	Role       string      `json:"role"`
-	Content    interface{} `json:"content"` // string or []ContentBlock
-	Name       string      `json:"name,omitempty"`
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Role             string      `json:"role"`
+	Content          interface{} `json:"content"` // string or []ContentBlock
+	Name             string      `json:"name,omitempty"`
+	ToolCalls        []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID       string      `json:"tool_call_id,omitempty"`
+	ReasoningContent interface{} `json:"reasoning_content,omitempty"`
 }
 
 // ContentBlock represents a multimodal content block.
