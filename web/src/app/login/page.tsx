@@ -7,10 +7,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, setToken } from "@/lib/api";
+import { useI18n } from "@/lib/i18n";
 import { Zap } from "lucide-react";
 
 export default function LoginPage() {
   const router = useRouter();
+  const { locale, setLocale, t } = useI18n();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -29,7 +31,7 @@ export default function LoginPage() {
       setToken(res.token);
       router.push("/");
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Login failed");
+      setError(err instanceof Error ? err.message : t("login.failed"));
     } finally {
       setLoading(false);
     }
@@ -37,18 +39,38 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background px-4">
+      <div className="absolute right-4 top-4 flex rounded-md bg-muted p-0.5">
+        <Button
+          type="button"
+          variant={locale === "en" ? "default" : "ghost"}
+          size="sm"
+          className="h-7 text-xs px-3"
+          onClick={() => setLocale("en")}
+        >
+          EN
+        </Button>
+        <Button
+          type="button"
+          variant={locale === "zh" ? "default" : "ghost"}
+          size="sm"
+          className="h-7 text-xs px-3"
+          onClick={() => setLocale("zh")}
+        >
+          中文
+        </Button>
+      </div>
       <Card className="w-full max-w-sm">
         <CardHeader className="text-center">
           <div className="flex justify-center mb-2">
             <Zap className="h-8 w-8 text-primary" />
           </div>
           <CardTitle className="text-xl">llmux</CardTitle>
-          <p className="text-sm text-muted-foreground">Sign in to manage your gateway</p>
+          <p className="text-sm text-muted-foreground">{t("login.subtitle")}</p>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleLogin} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="username">Username</Label>
+              <Label htmlFor="username">{t("login.username")}</Label>
               <Input
                 id="username"
                 value={username}
@@ -58,7 +80,7 @@ export default function LoginPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
+              <Label htmlFor="password">{t("login.password")}</Label>
               <Input
                 id="password"
                 type="password"
@@ -72,7 +94,7 @@ export default function LoginPage() {
               <p className="text-sm text-destructive">{error}</p>
             )}
             <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? "Signing in..." : "Sign in"}
+              {loading ? t("login.signingIn") : t("login.signIn")}
             </Button>
           </form>
         </CardContent>

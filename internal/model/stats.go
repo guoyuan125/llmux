@@ -4,13 +4,17 @@ import "time"
 
 // Stats holds aggregated metrics.
 type Stats struct {
-	InputTokens    int64   `json:"input_tokens" gorm:"default:0"`
-	OutputTokens   int64   `json:"output_tokens" gorm:"default:0"`
-	InputCost      float64 `json:"input_cost" gorm:"default:0"`
-	OutputCost     float64 `json:"output_cost" gorm:"default:0"`
-	TotalRequests  int64   `json:"total_requests" gorm:"default:0"`
-	FailedRequests int64   `json:"failed_requests" gorm:"default:0"`
-	TotalLatencyMs int64   `json:"total_latency_ms" gorm:"default:0"`
+	InputTokens       int64   `json:"input_tokens" gorm:"default:0"`
+	OutputTokens      int64   `json:"output_tokens" gorm:"default:0"`
+	InputCost         float64 `json:"input_cost" gorm:"default:0"`
+	OutputCost        float64 `json:"output_cost" gorm:"default:0"`
+	TotalRequests     int64   `json:"total_requests" gorm:"default:0"`
+	FailedRequests    int64   `json:"failed_requests" gorm:"default:0"`
+	TotalLatencyMs    int64   `json:"total_latency_ms" gorm:"default:0"`
+	TotalFirstByteMs  int64   `json:"total_first_byte_ms" gorm:"default:0"`
+	TotalFirstTokenMs int64   `json:"total_first_token_ms" gorm:"default:0"`
+	CacheReadTokens   int64   `json:"cache_read_tokens" gorm:"default:0"`
+	CacheWriteTokens  int64   `json:"cache_write_tokens" gorm:"default:0"`
 }
 
 // StatsDaily stores per-day aggregation.
@@ -48,26 +52,29 @@ type StatsAPIKey struct {
 
 // AuditLog records a single request for traceability.
 type AuditLog struct {
-	ID            uint      `json:"id" gorm:"primaryKey"`
-	RequestID     string    `json:"request_id" gorm:"index"`
-	APIKeyID      uint      `json:"api_key_id" gorm:"index"`
-	Model         string    `json:"model" gorm:"index"`          // client-requested model name
-	GroupName     string    `json:"group_name" gorm:"index"`     // matched group name
-	UpstreamModel string    `json:"upstream_model"`              // actual model sent to upstream
-	ChannelID     uint      `json:"channel_id"`
-	ChannelName   string    `json:"channel_name"`
-	StatusCode    int       `json:"status_code"`
-	InputTokens   int64     `json:"input_tokens"`
-	OutputTokens  int64     `json:"output_tokens"`
-	Cost          float64   `json:"cost"`
-	LatencyMs     int64     `json:"latency_ms"`
-	FirstTokenMs  int64     `json:"first_token_ms"`
-	Stream        bool      `json:"stream"`
-	Error         string    `json:"error"`
-	RequestBody   string    `json:"request_body,omitempty" gorm:"type:text"`  // stored only on error
-	ResponseBody  string    `json:"response_body,omitempty" gorm:"type:text"` // stored only on error
-	Attempts      int       `json:"attempts"`
-	CreatedAt     time.Time `json:"created_at" gorm:"index"`
+	ID               uint      `json:"id" gorm:"primaryKey"`
+	RequestID        string    `json:"request_id" gorm:"index"`
+	APIKeyID         uint      `json:"api_key_id" gorm:"index"`
+	Model            string    `json:"model" gorm:"index"`      // client-requested model name
+	GroupName        string    `json:"group_name" gorm:"index"` // matched group name
+	UpstreamModel    string    `json:"upstream_model"`          // actual model sent to upstream
+	ChannelID        uint      `json:"channel_id"`
+	ChannelName      string    `json:"channel_name"`
+	StatusCode       int       `json:"status_code"`
+	InputTokens      int64     `json:"input_tokens"`
+	OutputTokens     int64     `json:"output_tokens"`
+	Cost             float64   `json:"cost"`
+	LatencyMs        int64     `json:"latency_ms"`
+	FirstByteMs      int64     `json:"first_byte_ms"`
+	FirstTokenMs     int64     `json:"first_token_ms"`
+	CacheReadTokens  int64     `json:"cache_read_tokens"`
+	CacheWriteTokens int64     `json:"cache_write_tokens"`
+	Stream           bool      `json:"stream"`
+	Error            string    `json:"error"`
+	RequestBody      string    `json:"request_body,omitempty" gorm:"type:text"`  // stored only on error
+	ResponseBody     string    `json:"response_body,omitempty" gorm:"type:text"` // stored only on error
+	Attempts         int       `json:"attempts"`
+	CreatedAt        time.Time `json:"created_at" gorm:"index"`
 }
 
 // ModelPrice stores pricing information per model.

@@ -9,7 +9,8 @@ import {
 } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Search, RefreshCw, Radio, ChevronDown, ChevronRight } from "lucide-react";
+import { Search, RefreshCw, Wifi, WifiOff, Loader2, ChevronDown, ChevronRight } from "lucide-react";
+import { useI18n } from "@/lib/i18n";
 
 interface AuditLog {
   id: number;
@@ -37,10 +38,11 @@ interface AuditLog {
 const MAX_LOGS = 200;
 
 export default function LogsPage() {
+  const { locale, t } = useI18n();
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
-  const [connected, setConnected] = useState(false);
+  const [connStatus, setConnStatus] = useState<"connecting" | "live" | "disconnected">("connecting");
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const esRef = useRef<EventSource | null>(null);
 
@@ -71,8 +73,8 @@ export default function LogsPage() {
       });
     });
 
-    es.onopen = () => setConnected(true);
-    es.onerror = () => setConnected(false);
+    es.onopen = () => setConnStatus("live");
+    es.onerror = () => setConnStatus("disconnected");
 
     return () => {
       es.close();
@@ -83,7 +85,7 @@ export default function LogsPage() {
   const formatTime = (ts: string) => {
     if (!ts) return "-";
     const d = new Date(ts);
-    return d.toLocaleTimeString();
+    return d.toLocaleTimeString(locale === "zh" ? "zh-CN" : "en-US");
   };
 
   const toggleExpand = (id: number) => {
@@ -93,8 +95,8 @@ export default function LogsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Request Logs</h1>
-        <p className="text-muted-foreground">Audit trail of all gateway requests</p>
+        <h1 className="text-2xl font-bold tracking-tight">{t("logs.title")}</h1>
+        <p className="text-muted-foreground">{t("logs.subtitle")}</p>
       </div>
 
       <div className="flex gap-2 items-center">
@@ -102,7 +104,7 @@ export default function LogsPage() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             className="pl-9"
-            placeholder="Filter by model..."
+            placeholder={t("logs.filterByModel")}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && fetchLogs()}
@@ -111,14 +113,30 @@ export default function LogsPage() {
         <Button variant="outline" size="icon" onClick={fetchLogs}>
           <RefreshCw className="h-4 w-4" />
         </Button>
-        <span className="flex items-center text-xs text-muted-foreground gap-1.5">
-          <Radio className={`h-3 w-3 ${connected ? "text-green-500" : "text-red-500"}`} />
-          {connected ? "Live" : "Disconnected"}
+        <span className="flex items-center text-xs text-muted-foreground gap-1.5" title={t("logs.connectionTitle")}>
+          {connStatus === "connecting" && (
+            <>
+              <Loader2 className="h-3 w-3 animate-spin text-yellow-500" />
+              {t("logs.connecting")}
+            </>
+          )}
+          {connStatus === "live" && (
+            <>
+              <Wifi className="h-3 w-3 text-green-500" />
+              {t("logs.live")}
+            </>
+          )}
+          {connStatus === "disconnected" && (
+            <>
+              <WifiOff className="h-3 w-3 text-red-500" />
+              {t("logs.disconnected")}
+            </>
+          )}
         </span>
       </div>
 
       <Card>
-        <CardHeader><CardTitle>Recent Requests</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{t("logs.recent")}</CardTitle></CardHeader>
         <CardContent>
           {loading ? (
             <div className="space-y-2">
@@ -129,14 +147,14 @@ export default function LogsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-6"></TableHead>
-                  <TableHead>Time</TableHead>
-                  <TableHead>Request Model</TableHead>
-                  <TableHead>Group</TableHead>
-                  <TableHead>Channel → Upstream</TableHead>
-                  <TableHead>Latency</TableHead>
-                  <TableHead>TTFT</TableHead>
-                  <TableHead>Tokens</TableHead>
-                  <TableHead>Status</TableHead>
+                  <TableHead>{t("logs.time")}</TableHead>
+                  <TableHead>{t("logs.requestModel")}</TableHead>
+                  <TableHead>{t("logs.group")}</TableHead>
+                  <TableHead>{t("logs.channelUpstream")}</TableHead>
+                  <TableHead>{t("logs.latency")}</TableHead>
+                  <TableHead>{t("logs.ttft")}</TableHead>
+                  <TableHead>{t("logs.tokens")}</TableHead>
+                  <TableHead>{t("common.status")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -174,9 +192,9 @@ export default function LogsPage() {
                       </TableCell>
                       <TableCell>
                         {log.error ? (
-                          <Badge variant="destructive" className="text-xs">Error</Badge>
+                          <Badge variant="destructive" className="text-xs">{t("common.error")}</Badge>
                         ) : (
-                          <Badge variant="default" className="text-xs">OK</Badge>
+                          <Badge variant="default" className="text-xs">{t("common.ok")}</Badge>
                         )}
                       </TableCell>
                     </TableRow>
@@ -185,49 +203,49 @@ export default function LogsPage() {
                         <TableCell colSpan={9} className="p-4">
                           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
                             <div>
-                              <span className="text-muted-foreground">Request ID</span>
+                              <span className="text-muted-foreground">{t("logs.requestId")}</span>
                               <p className="font-mono mt-0.5">{log.request_id || "-"}</p>
                             </div>
                             <div>
-                              <span className="text-muted-foreground">API Key ID</span>
+                              <span className="text-muted-foreground">{t("logs.apiKeyId")}</span>
                               <p className="mt-0.5">{log.api_key_id}</p>
                             </div>
                             <div>
-                              <span className="text-muted-foreground">Channel ID</span>
+                              <span className="text-muted-foreground">{t("logs.channelId")}</span>
                               <p className="mt-0.5">{log.channel_id}</p>
                             </div>
                             <div>
-                              <span className="text-muted-foreground">Attempts</span>
+                              <span className="text-muted-foreground">{t("logs.attempts")}</span>
                               <p className="mt-0.5">{log.attempts}</p>
                             </div>
                             <div>
-                              <span className="text-muted-foreground">Stream</span>
-                              <p className="mt-0.5">{log.stream ? "Yes" : "No"}</p>
+                              <span className="text-muted-foreground">{t("logs.stream")}</span>
+                              <p className="mt-0.5">{log.stream ? t("common.yes") : t("common.no")}</p>
                             </div>
                             <div>
-                              <span className="text-muted-foreground">Input Tokens</span>
+                              <span className="text-muted-foreground">{t("logs.inputTokens")}</span>
                               <p className="mt-0.5">{log.input_tokens}</p>
                             </div>
                             <div>
-                              <span className="text-muted-foreground">Output Tokens</span>
+                              <span className="text-muted-foreground">{t("logs.outputTokens")}</span>
                               <p className="mt-0.5">{log.output_tokens}</p>
                             </div>
                             <div>
-                              <span className="text-muted-foreground">Cost</span>
+                              <span className="text-muted-foreground">{t("logs.cost")}</span>
                               <p className="mt-0.5">{log.cost > 0 ? `$${log.cost.toFixed(6)}` : "-"}</p>
                             </div>
                             <div>
-                              <span className="text-muted-foreground">Created At</span>
-                              <p className="mt-0.5">{new Date(log.created_at).toLocaleString()}</p>
+                              <span className="text-muted-foreground">{t("logs.createdAt")}</span>
+                              <p className="mt-0.5">{new Date(log.created_at).toLocaleString(locale === "zh" ? "zh-CN" : "en-US")}</p>
                             </div>
                             <div>
-                              <span className="text-muted-foreground">Status Code</span>
+                              <span className="text-muted-foreground">{t("logs.statusCode")}</span>
                               <p className="mt-0.5">{log.status_code || "-"}</p>
                             </div>
                           </div>
                           {log.error && (
                             <div className="mt-3 p-2 rounded bg-destructive/10 border border-destructive/20">
-                              <span className="text-xs text-muted-foreground">Error</span>
+                              <span className="text-xs text-muted-foreground">{t("common.error")}</span>
                               <p className="text-xs font-mono mt-0.5 text-destructive whitespace-pre-wrap break-all">
                                 {log.error}
                               </p>
@@ -235,7 +253,7 @@ export default function LogsPage() {
                           )}
                           {log.request_body && (
                             <div className="mt-3 p-2 rounded bg-muted/50 border border-border">
-                              <span className="text-xs text-muted-foreground">Request Body</span>
+                              <span className="text-xs text-muted-foreground">{t("logs.requestBody")}</span>
                               <pre className="text-xs font-mono mt-1 whitespace-pre-wrap break-all max-h-48 overflow-auto">
                                 {(() => { try { return JSON.stringify(JSON.parse(log.request_body), null, 2); } catch { return log.request_body; } })()}
                               </pre>
@@ -243,7 +261,7 @@ export default function LogsPage() {
                           )}
                           {log.response_body && log.response_body !== log.error && (
                             <div className="mt-3 p-2 rounded bg-muted/50 border border-border">
-                              <span className="text-xs text-muted-foreground">Response Body</span>
+                              <span className="text-xs text-muted-foreground">{t("logs.responseBody")}</span>
                               <pre className="text-xs font-mono mt-1 whitespace-pre-wrap break-all max-h-48 overflow-auto">
                                 {log.response_body}
                               </pre>
@@ -257,7 +275,7 @@ export default function LogsPage() {
                 {logs.length === 0 && (
                   <TableRow>
                     <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
-                      No request logs yet.
+                      {t("logs.empty")}
                     </TableCell>
                   </TableRow>
                 )}

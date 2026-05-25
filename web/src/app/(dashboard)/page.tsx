@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
+import { useI18n } from "@/lib/i18n";
 import {
   Activity,
   DollarSign,
@@ -72,6 +73,7 @@ const COLORS = [
 ];
 
 export default function DashboardPage() {
+  const { t } = useI18n();
   const [stats, setStats] = useState<StatsOverview | null>(null);
   const [timeData, setTimeData] = useState<TimeStats[]>([]);
   const [models, setModels] = useState<ModelStats[]>([]);
@@ -130,35 +132,35 @@ export default function DashboardPage() {
     value: m.total_requests,
   }));
 
-  const periodLabel = period === "hourly" ? "Today" : "7d";
+  const periodLabel = period === "hourly" ? t("dashboard.today") : t("dashboard.sevenDays");
 
   const overviewCards = [
     {
-      title: "Requests Today",
+      title: t("dashboard.requestsToday"),
       value: stats?.requests_today ?? 0,
       icon: Activity,
-      description: `${stats?.failed_today ?? 0} failed`,
+      description: t("dashboard.failedCount", { count: stats?.failed_today ?? 0 }),
       color: "text-blue-500",
     },
     {
-      title: "Success Rate",
+      title: t("dashboard.successRate"),
       value: stats ? `${stats.success_rate.toFixed(1)}%` : "-",
       icon: TrendingUp,
-      description: "Today",
+      description: t("dashboard.today"),
       color: (stats?.success_rate ?? 100) >= 99 ? "text-green-500" : "text-yellow-500",
     },
     {
-      title: "Avg Latency",
+      title: t("dashboard.avgLatency"),
       value: stats ? `${stats.avg_latency_ms}ms` : "-",
       icon: Clock,
-      description: "Per request today",
+      description: t("dashboard.perRequestToday"),
       color: "text-purple-500",
     },
     {
-      title: "Cost Today",
+      title: t("dashboard.costToday"),
       value: stats ? formatCost(stats.cost_today) : "-",
       icon: DollarSign,
-      description: `${formatTokens(stats?.tokens_today ?? 0)} tokens`,
+      description: t("dashboard.tokens", { count: formatTokens(stats?.tokens_today ?? 0) }),
       color: "text-emerald-500",
     },
   ];
@@ -174,8 +176,8 @@ export default function DashboardPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
-          <p className="text-muted-foreground">LLM Gateway monitoring overview</p>
+          <h1 className="text-2xl font-bold tracking-tight">{t("nav.dashboard")}</h1>
+          <p className="text-muted-foreground">{t("dashboard.subtitle")}</p>
         </div>
         <div className="flex gap-1 bg-muted rounded-md p-0.5">
           <Button
@@ -184,7 +186,7 @@ export default function DashboardPage() {
             className="h-7 text-xs px-3"
             onClick={() => setPeriod("hourly")}
           >
-            Hourly
+            {t("dashboard.hourly")}
           </Button>
           <Button
             variant={period === "daily" ? "default" : "ghost"}
@@ -192,7 +194,7 @@ export default function DashboardPage() {
             className="h-7 text-xs px-3"
             onClick={() => setPeriod("daily")}
           >
-            Daily
+            {t("dashboard.daily")}
           </Button>
         </div>
       </div>
@@ -225,7 +227,7 @@ export default function DashboardPage() {
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Requests ({periodLabel})</CardTitle>
+            <CardTitle className="text-base">{t("dashboard.requests", { period: periodLabel })}</CardTitle>
           </CardHeader>
           <CardContent>
             {loading ? (
@@ -242,14 +244,14 @@ export default function DashboardPage() {
                     dataKey="requests"
                     stroke="hsl(220 70% 50%)"
                     fill="hsl(220 70% 50% / 0.1)"
-                    name="Total"
+                    name={t("dashboard.total")}
                   />
                   <Area
                     type="monotone"
                     dataKey="failed"
                     stroke="hsl(0 72% 51%)"
                     fill="hsl(0 72% 51% / 0.1)"
-                    name="Failed"
+                    name={t("dashboard.failed")}
                   />
                 </AreaChart>
               </ResponsiveContainer>
@@ -259,7 +261,7 @@ export default function DashboardPage() {
 
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Cost ({periodLabel})</CardTitle>
+            <CardTitle className="text-base">{t("dashboard.cost", { period: periodLabel })}</CardTitle>
           </CardHeader>
           <CardContent>
             {loading ? (
@@ -270,8 +272,8 @@ export default function DashboardPage() {
                   <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
                   <XAxis dataKey="label" className="text-xs" tick={{ fontSize: 11 }} />
                   <YAxis className="text-xs" tick={{ fontSize: 11 }} tickFormatter={(v) => `$${v}`} />
-                  <Tooltip contentStyle={tooltipStyle} formatter={(value) => [`$${Number(value).toFixed(4)}`, "Cost"]} />
-                  <Bar dataKey="cost" fill="hsl(160 60% 45%)" radius={[4, 4, 0, 0]} name="Cost" />
+                  <Tooltip contentStyle={tooltipStyle} formatter={(value) => [`$${Number(value).toFixed(4)}`, t("logs.cost")]} />
+                  <Bar dataKey="cost" fill="hsl(160 60% 45%)" radius={[4, 4, 0, 0]} name={t("logs.cost")} />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -283,7 +285,7 @@ export default function DashboardPage() {
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Token Usage ({periodLabel})</CardTitle>
+            <CardTitle className="text-base">{t("dashboard.tokenUsage", { period: periodLabel })}</CardTitle>
           </CardHeader>
           <CardContent>
             {loading ? (
@@ -295,8 +297,8 @@ export default function DashboardPage() {
                   <XAxis dataKey="label" className="text-xs" tick={{ fontSize: 11 }} />
                   <YAxis className="text-xs" tick={{ fontSize: 11 }} tickFormatter={formatTokens} />
                   <Tooltip contentStyle={tooltipStyle} formatter={(value) => [formatTokens(Number(value)), ""]} />
-                  <Bar dataKey="inputTokens" stackId="tokens" fill="hsl(220 70% 50%)" name="Input" />
-                  <Bar dataKey="outputTokens" stackId="tokens" fill="hsl(280 65% 60%)" radius={[4, 4, 0, 0]} name="Output" />
+                  <Bar dataKey="inputTokens" stackId="tokens" fill="hsl(220 70% 50%)" name={t("dashboard.input")} />
+                  <Bar dataKey="outputTokens" stackId="tokens" fill="hsl(280 65% 60%)" radius={[4, 4, 0, 0]} name={t("dashboard.output")} />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -305,7 +307,7 @@ export default function DashboardPage() {
 
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Model Distribution</CardTitle>
+            <CardTitle className="text-base">{t("dashboard.modelDistribution")}</CardTitle>
           </CardHeader>
           <CardContent>
             {loading || modelPie.length === 0 ? (
@@ -313,7 +315,7 @@ export default function DashboardPage() {
                 {loading ? (
                   <div className="h-[200px] w-full rounded bg-muted animate-pulse" />
                 ) : (
-                  "No data yet"
+                  t("dashboard.noData")
                 )}
               </div>
             ) : (
@@ -344,7 +346,7 @@ export default function DashboardPage() {
       {/* Latency Trend */}
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Avg Latency ({periodLabel})</CardTitle>
+          <CardTitle className="text-base">{t("dashboard.avgLatencyWithPeriod", { period: periodLabel })}</CardTitle>
         </CardHeader>
         <CardContent>
           {loading ? (
@@ -355,13 +357,13 @@ export default function DashboardPage() {
                 <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
                 <XAxis dataKey="label" className="text-xs" tick={{ fontSize: 11 }} />
                 <YAxis className="text-xs" tick={{ fontSize: 11 }} tickFormatter={(v) => `${v}ms`} />
-                <Tooltip contentStyle={tooltipStyle} formatter={(value) => [`${value}ms`, "Avg Latency"]} />
+                <Tooltip contentStyle={tooltipStyle} formatter={(value) => [`${value}ms`, t("dashboard.avgLatency")]} />
                 <Area
                   type="monotone"
                   dataKey="avgLatency"
                   stroke="hsl(30 80% 55%)"
                   fill="hsl(30 80% 55% / 0.1)"
-                  name="Avg Latency"
+                  name={t("dashboard.avgLatency")}
                 />
               </AreaChart>
             </ResponsiveContainer>

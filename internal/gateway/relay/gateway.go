@@ -15,18 +15,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/liuguoyuan/llmux/internal/gateway/balancer"
 	"github.com/liuguoyuan/llmux/internal/gateway/circuit"
 	"github.com/liuguoyuan/llmux/internal/gateway/session"
 	"github.com/liuguoyuan/llmux/internal/metrics"
 	"github.com/liuguoyuan/llmux/internal/model"
 	"github.com/liuguoyuan/llmux/internal/ratelimit"
-	"github.com/liuguoyuan/llmux/internal/transformer/types"
 	inboundAnthropic "github.com/liuguoyuan/llmux/internal/transformer/inbound/anthropic"
 	inboundOpenAI "github.com/liuguoyuan/llmux/internal/transformer/inbound/openai"
 	outboundAnthropic "github.com/liuguoyuan/llmux/internal/transformer/outbound/anthropic"
 	outboundOpenAI "github.com/liuguoyuan/llmux/internal/transformer/outbound/openai"
-	"github.com/gin-gonic/gin"
+	"github.com/liuguoyuan/llmux/internal/transformer/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
 )
@@ -113,7 +113,6 @@ const (
 //
 //  3. Embedding passthrough:
 //     Embedding requests are forwarded with minimal transformation (model name only).
-//
 func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 	startTime := time.Now()
 	apiKeyID := c.GetUint("api_key_id")
@@ -310,12 +309,16 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 		// Use channel-specific proxy if configured
 		client := g.getHTTPClient(channel.Proxy)
 
+		upstreamStart := time.Now()
 		resp, err := client.Do(httpReq)
+		firstByteMs := time.Since(upstreamStart).Milliseconds()
 		if err != nil {
 			lastErr = fmt.Errorf("channel %s: request failed: %w", channel.Name, err)
+			metrics.FirstByteLatency.With(prometheus.Labels{"model": requestModel, "channel": channel.Name, "status": "error"}).Observe(float64(firstByteMs) / 1000.0)
 			g.circuit.RecordFailure(cbKey)
 			continue
 		}
+		metrics.FirstByteLatency.With(prometheus.Labels{"model": requestModel, "channel": channel.Name, "status": fmt.Sprintf("%d", resp.StatusCode)}).Observe(float64(firstByteMs) / 1000.0)
 
 		// Check status
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -347,18 +350,18 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 		// Same-protocol → passthrough (preserves all protocol features).
 		// Cross-protocol → transform (parses and rebuilds in target format).
 		if isEmbedding {
-			g.handleEmbeddingPassthrough(c, resp, outAdapter, &channel, channelKey, rctx, startTime, apiKeyID, attempts)
+			g.handleEmbeddingPassthrough(c, resp, outAdapter, &channel, channelKey, rctx, startTime, firstByteMs, apiKeyID, attempts)
 		} else if isStream {
 			if inboundType == InboundAnthropic && channel.Type == model.ChannelTypeAnthropic {
-				g.handleStreamPassthrough(c, resp, &channel, channelKey, rctx, startTime, apiKeyID, attempts, group.FirstTokenTimeout)
+				g.handleStreamPassthrough(c, resp, &channel, channelKey, rctx, startTime, firstByteMs, apiKeyID, attempts, group.FirstTokenTimeout)
 			} else {
-				g.handleStreamResponse(c, resp, inAdapter, outAdapter, &channel, channelKey, rctx, startTime, apiKeyID, attempts, group.FirstTokenTimeout)
+				g.handleStreamResponse(c, resp, inAdapter, outAdapter, &channel, channelKey, rctx, startTime, firstByteMs, apiKeyID, attempts, group.FirstTokenTimeout)
 			}
 		} else {
 			if inboundType == InboundAnthropic && channel.Type == model.ChannelTypeAnthropic {
-				g.handleNonStreamPassthrough(c, resp, &channel, channelKey, rctx, startTime, apiKeyID, attempts)
+				g.handleNonStreamPassthrough(c, resp, &channel, channelKey, rctx, startTime, firstByteMs, apiKeyID, attempts)
 			} else {
-				g.handleNonStreamResponse(c, resp, inAdapter, outAdapter, &channel, channelKey, rctx, startTime, apiKeyID, attempts)
+				g.handleNonStreamResponse(c, resp, inAdapter, outAdapter, &channel, channelKey, rctx, startTime, firstByteMs, apiKeyID, attempts)
 			}
 		}
 
@@ -378,13 +381,13 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 
 	// Save error audit log with request body for debugging
 	errChannel := &model.Channel{Name: "none"}
-	go g.saveAuditLog(nil, errChannel, requestModel, group.Name, "", latencyMs, 0, apiKeyID, attempts, fmt.Errorf("%s", errMsg), body)
+	go g.saveAuditLog(nil, errChannel, requestModel, group.Name, "", latencyMs, 0, 0, apiKeyID, attempts, fmt.Errorf("%s", errMsg), body)
 
 	c.JSON(http.StatusBadGateway, gin.H{"error": errMsg})
 }
 
 // handleNonStreamResponse processes a non-streaming upstream response.
-func (g *Gateway) handleNonStreamResponse(c *gin.Context, resp *http.Response, inAdapter types.Inbound, outAdapter types.Outbound, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, apiKeyID uint, attempts int) {
+func (g *Gateway) handleNonStreamResponse(c *gin.Context, resp *http.Response, inAdapter types.Inbound, outAdapter types.Outbound, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, firstByteMs int64, apiKeyID uint, attempts int) {
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
@@ -409,13 +412,13 @@ func (g *Gateway) handleNonStreamResponse(c *gin.Context, resp *http.Response, i
 
 	// Record metrics
 	latencyMs := time.Since(startTime).Milliseconds()
-	g.recordMetrics(internalResp, channel, rctx, latencyMs, apiKeyID, attempts, key)
+	g.recordMetrics(internalResp, channel, rctx, latencyMs, firstByteMs, apiKeyID, attempts, key)
 
 	c.Data(http.StatusOK, "application/json", clientBody)
 }
 
 // handleStreamResponse processes a streaming SSE upstream response.
-func (g *Gateway) handleStreamResponse(c *gin.Context, resp *http.Response, inAdapter types.Inbound, outAdapter types.Outbound, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, apiKeyID uint, attempts int, firstTokenTimeout int) {
+func (g *Gateway) handleStreamResponse(c *gin.Context, resp *http.Response, inAdapter types.Inbound, outAdapter types.Outbound, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, firstByteMs int64, apiKeyID uint, attempts int, firstTokenTimeout int) {
 	defer resp.Body.Close()
 
 	// Set SSE headers
@@ -485,7 +488,7 @@ func (g *Gateway) handleStreamResponse(c *gin.Context, resp *http.Response, inAd
 				if !firstTokenTime.IsZero() {
 					ftMs = firstTokenTime.Sub(startTime).Milliseconds()
 				}
-				g.recordStreamMetrics(inAdapter, channel, rctx, latencyMs, ftMs, apiKeyID, attempts, key)
+				g.recordStreamMetrics(inAdapter, channel, rctx, latencyMs, firstByteMs, ftMs, apiKeyID, attempts, key)
 				return
 			}
 
@@ -530,7 +533,7 @@ func (g *Gateway) handleStreamResponse(c *gin.Context, resp *http.Response, inAd
 				if !firstTokenTime.IsZero() {
 					ftMs = firstTokenTime.Sub(startTime).Milliseconds()
 				}
-				g.recordStreamMetrics(inAdapter, channel, rctx, latencyMs, ftMs, apiKeyID, attempts, key)
+				g.recordStreamMetrics(inAdapter, channel, rctx, latencyMs, firstByteMs, ftMs, apiKeyID, attempts, key)
 				return
 			}
 		}
@@ -548,7 +551,7 @@ func (g *Gateway) handleStreamResponse(c *gin.Context, resp *http.Response, inAd
 //
 // Usage is extracted from SSE events (message_start, message_delta) for audit logging
 // without modifying the stream content.
-func (g *Gateway) handleStreamPassthrough(c *gin.Context, resp *http.Response, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, apiKeyID uint, attempts int, firstTokenTimeout int) {
+func (g *Gateway) handleStreamPassthrough(c *gin.Context, resp *http.Response, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, firstByteMs int64, apiKeyID uint, attempts int, firstTokenTimeout int) {
 	defer resp.Body.Close()
 
 	c.Header("Content-Type", "text/event-stream")
@@ -650,7 +653,8 @@ func (g *Gateway) handleStreamPassthrough(c *gin.Context, resp *http.Response, c
 	if usage.PromptTokens > 0 || usage.CompletionTokens > 0 {
 		resp2 = &types.InternalResponse{Usage: &usage}
 	}
-	go g.saveAuditLog(resp2, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, ftMs, apiKeyID, attempts, nil, nil)
+	g.recordUsageMetrics(resp2, channel, rctx)
+	go g.saveAuditLog(resp2, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, firstByteMs, ftMs, apiKeyID, attempts, nil, nil)
 }
 
 // extractAnthropicUsage parses usage fields from Anthropic SSE event data.
@@ -690,7 +694,7 @@ func (g *Gateway) extractAnthropicUsage(data string, usage *types.Usage) {
 // handleNonStreamPassthrough relays non-streaming response body directly to the client.
 // Same rationale as handleStreamPassthrough — preserves protocol fidelity for same-protocol relay.
 // Extracts usage from the JSON response body for audit logging without modifying the payload.
-func (g *Gateway) handleNonStreamPassthrough(c *gin.Context, resp *http.Response, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, apiKeyID uint, attempts int) {
+func (g *Gateway) handleNonStreamPassthrough(c *gin.Context, resp *http.Response, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, firstByteMs int64, apiKeyID uint, attempts int) {
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -726,38 +730,48 @@ func (g *Gateway) handleNonStreamPassthrough(c *gin.Context, resp *http.Response
 		}}
 	}
 
-	go g.saveAuditLog(ir, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, 0, apiKeyID, attempts, nil, nil)
+	g.recordUsageMetrics(ir, channel, rctx)
+	go g.saveAuditLog(ir, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, firstByteMs, 0, apiKeyID, attempts, nil, nil)
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
 }
 
-func (g *Gateway) recordMetrics(resp *types.InternalResponse, channel *model.Channel, rctx routeCtx, latencyMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
+func (g *Gateway) recordMetrics(resp *types.InternalResponse, channel *model.Channel, rctx routeCtx, latencyMs, firstByteMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
 	metrics.RequestsTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "status": "success"}).Inc()
 	metrics.RequestDuration.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
-
-	if resp != nil && resp.Usage != nil {
-		metrics.TokensTotal.With(prometheus.Labels{"model": rctx.RequestModel, "direction": "input"}).Add(float64(resp.Usage.PromptTokens))
-		metrics.TokensTotal.With(prometheus.Labels{"model": rctx.RequestModel, "direction": "output"}).Add(float64(resp.Usage.CompletionTokens))
-	}
+	g.recordUsageMetrics(resp, channel, rctx)
 
 	// Save audit log asynchronously
-	go g.saveAuditLog(resp, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, 0, apiKeyID, attempts, nil, nil)
+	go g.saveAuditLog(resp, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, firstByteMs, 0, apiKeyID, attempts, nil, nil)
 }
 
-func (g *Gateway) recordStreamMetrics(inAdapter types.Inbound, channel *model.Channel, rctx routeCtx, latencyMs, firstTokenMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
+func (g *Gateway) recordStreamMetrics(inAdapter types.Inbound, channel *model.Channel, rctx routeCtx, latencyMs, firstByteMs, firstTokenMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
 	metrics.RequestsTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "status": "success"}).Inc()
 	metrics.RequestDuration.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
 
 	// Get aggregated response for token counting
 	resp, _ := inAdapter.GetInternalResponse(context.Background())
-	if resp != nil && resp.Usage != nil {
-		metrics.TokensTotal.With(prometheus.Labels{"model": rctx.RequestModel, "direction": "input"}).Add(float64(resp.Usage.PromptTokens))
-		metrics.TokensTotal.With(prometheus.Labels{"model": rctx.RequestModel, "direction": "output"}).Add(float64(resp.Usage.CompletionTokens))
-	}
+	g.recordUsageMetrics(resp, channel, rctx)
 
-	go g.saveAuditLog(resp, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, firstTokenMs, apiKeyID, attempts, nil, nil)
+	go g.saveAuditLog(resp, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, firstByteMs, firstTokenMs, apiKeyID, attempts, nil, nil)
 }
 
-func (g *Gateway) saveAuditLog(resp *types.InternalResponse, channel *model.Channel, requestModel, groupName, upstreamModel string, latencyMs, firstTokenMs int64, apiKeyID uint, attempts int, lastErr error, reqBody []byte) {
+func (g *Gateway) recordUsageMetrics(resp *types.InternalResponse, channel *model.Channel, rctx routeCtx) {
+	cacheResult := "miss"
+	if resp != nil && resp.Usage != nil {
+		metrics.TokensTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "direction": "input"}).Add(float64(resp.Usage.PromptTokens))
+		metrics.TokensTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "direction": "output"}).Add(float64(resp.Usage.CompletionTokens))
+		if resp.Usage.CacheReadTokens > 0 {
+			cacheResult = "hit"
+			metrics.CacheTokensTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "direction": "read"}).Add(float64(resp.Usage.CacheReadTokens))
+		}
+		if resp.Usage.CacheWriteTokens > 0 {
+			metrics.CacheTokensTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "direction": "write"}).Add(float64(resp.Usage.CacheWriteTokens))
+		}
+	}
+	metrics.CacheRequestsTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "result": cacheResult}).Inc()
+}
+
+func (g *Gateway) saveAuditLog(resp *types.InternalResponse, channel *model.Channel, requestModel, groupName, upstreamModel string, latencyMs, firstByteMs, firstTokenMs int64, apiKeyID uint, attempts int, lastErr error, reqBody []byte) {
 	audit := model.AuditLog{
 		APIKeyID:      apiKeyID,
 		Model:         requestModel,
@@ -766,6 +780,7 @@ func (g *Gateway) saveAuditLog(resp *types.InternalResponse, channel *model.Chan
 		ChannelID:     channel.ID,
 		ChannelName:   channel.Name,
 		LatencyMs:     latencyMs,
+		FirstByteMs:   firstByteMs,
 		FirstTokenMs:  firstTokenMs,
 		Attempts:      attempts,
 		Stream:        firstTokenMs > 0,
@@ -774,6 +789,8 @@ func (g *Gateway) saveAuditLog(resp *types.InternalResponse, channel *model.Chan
 	if resp != nil && resp.Usage != nil {
 		audit.InputTokens = int64(resp.Usage.PromptTokens)
 		audit.OutputTokens = int64(resp.Usage.CompletionTokens)
+		audit.CacheReadTokens = int64(resp.Usage.CacheReadTokens)
+		audit.CacheWriteTokens = int64(resp.Usage.CacheWriteTokens)
 	}
 	if lastErr != nil {
 		audit.Error = lastErr.Error()
@@ -826,8 +843,8 @@ func (g *Gateway) updateStats(audit *model.AuditLog) {
 	}
 
 	// StatsDaily
-	g.db.Exec(`INSERT INTO stats_dailies (date, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms)
-		VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+	g.db.Exec(`INSERT INTO stats_dailies (date, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms, total_first_byte_ms, total_first_token_ms, cache_read_tokens, cache_write_tokens)
+		VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(date) DO UPDATE SET
 			input_tokens = input_tokens + ?,
 			output_tokens = output_tokens + ?,
@@ -835,13 +852,17 @@ func (g *Gateway) updateStats(audit *model.AuditLog) {
 			output_cost = output_cost + ?,
 			total_requests = total_requests + 1,
 			failed_requests = failed_requests + ?,
-			total_latency_ms = total_latency_ms + ?`,
-		today, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs,
-		audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs)
+			total_latency_ms = total_latency_ms + ?,
+			total_first_byte_ms = total_first_byte_ms + ?,
+			total_first_token_ms = total_first_token_ms + ?,
+			cache_read_tokens = cache_read_tokens + ?,
+			cache_write_tokens = cache_write_tokens + ?`,
+		today, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs, audit.FirstByteMs, audit.FirstTokenMs, audit.CacheReadTokens, audit.CacheWriteTokens,
+		audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs, audit.FirstByteMs, audit.FirstTokenMs, audit.CacheReadTokens, audit.CacheWriteTokens)
 
 	// StatsHourly
-	g.db.Exec(`INSERT INTO stats_hourlies (hour, date, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms)
-		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+	g.db.Exec(`INSERT INTO stats_hourlies (hour, date, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms, total_first_byte_ms, total_first_token_ms, cache_read_tokens, cache_write_tokens)
+		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(hour) DO UPDATE SET
 			date = ?,
 			input_tokens = CASE WHEN date = ? THEN input_tokens + ? ELSE ? END,
@@ -850,8 +871,12 @@ func (g *Gateway) updateStats(audit *model.AuditLog) {
 			output_cost = CASE WHEN date = ? THEN output_cost + ? ELSE ? END,
 			total_requests = CASE WHEN date = ? THEN total_requests + 1 ELSE 1 END,
 			failed_requests = CASE WHEN date = ? THEN failed_requests + ? ELSE ? END,
-			total_latency_ms = CASE WHEN date = ? THEN total_latency_ms + ? ELSE ? END`,
-		hour, today, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs,
+			total_latency_ms = CASE WHEN date = ? THEN total_latency_ms + ? ELSE ? END,
+			total_first_byte_ms = CASE WHEN date = ? THEN total_first_byte_ms + ? ELSE ? END,
+			total_first_token_ms = CASE WHEN date = ? THEN total_first_token_ms + ? ELSE ? END,
+			cache_read_tokens = CASE WHEN date = ? THEN cache_read_tokens + ? ELSE ? END,
+			cache_write_tokens = CASE WHEN date = ? THEN cache_write_tokens + ? ELSE ? END`,
+		hour, today, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs, audit.FirstByteMs, audit.FirstTokenMs, audit.CacheReadTokens, audit.CacheWriteTokens,
 		today,
 		today, audit.InputTokens, audit.InputTokens,
 		today, audit.OutputTokens, audit.OutputTokens,
@@ -859,11 +884,15 @@ func (g *Gateway) updateStats(audit *model.AuditLog) {
 		today, outputCost, outputCost,
 		today,
 		today, failed, failed,
-		today, audit.LatencyMs, audit.LatencyMs)
+		today, audit.LatencyMs, audit.LatencyMs,
+		today, audit.FirstByteMs, audit.FirstByteMs,
+		today, audit.FirstTokenMs, audit.FirstTokenMs,
+		today, audit.CacheReadTokens, audit.CacheReadTokens,
+		today, audit.CacheWriteTokens, audit.CacheWriteTokens)
 
 	// StatsModel
-	g.db.Exec(`INSERT INTO stats_models (model_name, channel_id, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms)
-		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+	g.db.Exec(`INSERT INTO stats_models (model_name, channel_id, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms, total_first_byte_ms, total_first_token_ms, cache_read_tokens, cache_write_tokens)
+		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(model_name, channel_id) DO UPDATE SET
 			input_tokens = input_tokens + ?,
 			output_tokens = output_tokens + ?,
@@ -871,13 +900,17 @@ func (g *Gateway) updateStats(audit *model.AuditLog) {
 			output_cost = output_cost + ?,
 			total_requests = total_requests + 1,
 			failed_requests = failed_requests + ?,
-			total_latency_ms = total_latency_ms + ?`,
-		audit.Model, audit.ChannelID, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs,
-		audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs)
+			total_latency_ms = total_latency_ms + ?,
+			total_first_byte_ms = total_first_byte_ms + ?,
+			total_first_token_ms = total_first_token_ms + ?,
+			cache_read_tokens = cache_read_tokens + ?,
+			cache_write_tokens = cache_write_tokens + ?`,
+		audit.Model, audit.ChannelID, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs, audit.FirstByteMs, audit.FirstTokenMs, audit.CacheReadTokens, audit.CacheWriteTokens,
+		audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs, audit.FirstByteMs, audit.FirstTokenMs, audit.CacheReadTokens, audit.CacheWriteTokens)
 
 	// StatsChannel
-	g.db.Exec(`INSERT INTO stats_channels (channel_id, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms)
-		VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+	g.db.Exec(`INSERT INTO stats_channels (channel_id, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms, total_first_byte_ms, total_first_token_ms, cache_read_tokens, cache_write_tokens)
+		VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(channel_id) DO UPDATE SET
 			input_tokens = input_tokens + ?,
 			output_tokens = output_tokens + ?,
@@ -885,13 +918,17 @@ func (g *Gateway) updateStats(audit *model.AuditLog) {
 			output_cost = output_cost + ?,
 			total_requests = total_requests + 1,
 			failed_requests = failed_requests + ?,
-			total_latency_ms = total_latency_ms + ?`,
-		audit.ChannelID, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs,
-		audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs)
+			total_latency_ms = total_latency_ms + ?,
+			total_first_byte_ms = total_first_byte_ms + ?,
+			total_first_token_ms = total_first_token_ms + ?,
+			cache_read_tokens = cache_read_tokens + ?,
+			cache_write_tokens = cache_write_tokens + ?`,
+		audit.ChannelID, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs, audit.FirstByteMs, audit.FirstTokenMs, audit.CacheReadTokens, audit.CacheWriteTokens,
+		audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs, audit.FirstByteMs, audit.FirstTokenMs, audit.CacheReadTokens, audit.CacheWriteTokens)
 
 	// StatsAPIKey
-	g.db.Exec(`INSERT INTO stats_api_keys (api_key_id, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms)
-		VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+	g.db.Exec(`INSERT INTO stats_api_keys (api_key_id, input_tokens, output_tokens, input_cost, output_cost, total_requests, failed_requests, total_latency_ms, total_first_byte_ms, total_first_token_ms, cache_read_tokens, cache_write_tokens)
+		VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(api_key_id) DO UPDATE SET
 			input_tokens = input_tokens + ?,
 			output_tokens = output_tokens + ?,
@@ -899,9 +936,13 @@ func (g *Gateway) updateStats(audit *model.AuditLog) {
 			output_cost = output_cost + ?,
 			total_requests = total_requests + 1,
 			failed_requests = failed_requests + ?,
-			total_latency_ms = total_latency_ms + ?`,
-		audit.APIKeyID, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs,
-		audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs)
+			total_latency_ms = total_latency_ms + ?,
+			total_first_byte_ms = total_first_byte_ms + ?,
+			total_first_token_ms = total_first_token_ms + ?,
+			cache_read_tokens = cache_read_tokens + ?,
+			cache_write_tokens = cache_write_tokens + ?`,
+		audit.APIKeyID, audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs, audit.FirstByteMs, audit.FirstTokenMs, audit.CacheReadTokens, audit.CacheWriteTokens,
+		audit.InputTokens, audit.OutputTokens, inputCost, outputCost, failed, audit.LatencyMs, audit.FirstByteMs, audit.FirstTokenMs, audit.CacheReadTokens, audit.CacheWriteTokens)
 }
 
 func (g *Gateway) findGroup(modelName string) (*model.Group, error) {
@@ -972,7 +1013,7 @@ func (g *Gateway) getEmbeddingOutbound(_ model.ChannelType) types.Outbound {
 
 // handleEmbeddingPassthrough relays an embedding response body directly to the client,
 // extracting usage for audit logging without transforming the vector data.
-func (g *Gateway) handleEmbeddingPassthrough(c *gin.Context, resp *http.Response, outAdapter types.Outbound, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, apiKeyID uint, attempts int) {
+func (g *Gateway) handleEmbeddingPassthrough(c *gin.Context, resp *http.Response, outAdapter types.Outbound, channel *model.Channel, key *model.ChannelKey, rctx routeCtx, startTime time.Time, firstByteMs int64, apiKeyID uint, attempts int) {
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
@@ -987,7 +1028,8 @@ func (g *Gateway) handleEmbeddingPassthrough(c *gin.Context, resp *http.Response
 
 	// Parse usage for audit log (best-effort)
 	ir, _ := outAdapter.TransformResponse(c.Request.Context(), resp.StatusCode, body)
-	go g.saveAuditLog(ir, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, 0, apiKeyID, attempts, nil, nil)
+	g.recordUsageMetrics(ir, channel, rctx)
+	go g.saveAuditLog(ir, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, firstByteMs, 0, apiKeyID, attempts, nil, nil)
 
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {

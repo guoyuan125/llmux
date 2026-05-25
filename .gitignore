@@ -25,6 +25,7 @@ web/.next/
 .planning/
 .baidu-cc/
 .playwright-mcp/
+.cache/
 
 # Temp screenshots and debug files
 *.png

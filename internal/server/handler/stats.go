@@ -22,25 +22,31 @@ func (h *Handler) StatsOverview(c *gin.Context) {
 
 	// Calculate success rate and avg latency from today's stats
 	var successRate float64
-	var avgLatency int64
+	var avgLatency, avgFirstByte, avgFirstToken int64
 	if todayStats.TotalRequests > 0 {
 		successRate = float64(todayStats.TotalRequests-todayStats.FailedRequests) / float64(todayStats.TotalRequests) * 100
 		avgLatency = todayStats.TotalLatencyMs / todayStats.TotalRequests
+		avgFirstByte = todayStats.TotalFirstByteMs / todayStats.TotalRequests
+		avgFirstToken = todayStats.TotalFirstTokenMs / todayStats.TotalRequests
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"channels":        channelCount,
-		"groups":          groupCount,
-		"api_keys":        apiKeyCount,
-		"requests_today":  todayStats.TotalRequests,
-		"tokens_today":    todayStats.InputTokens + todayStats.OutputTokens,
-		"input_tokens":    todayStats.InputTokens,
-		"output_tokens":   todayStats.OutputTokens,
-		"cost_today":      todayStats.InputCost + todayStats.OutputCost,
-		"failed_today":    todayStats.FailedRequests,
-		"success_rate":    successRate,
-		"avg_latency_ms":  avgLatency,
-		"total_latency_ms": todayStats.TotalLatencyMs,
+		"channels":           channelCount,
+		"groups":             groupCount,
+		"api_keys":           apiKeyCount,
+		"requests_today":     todayStats.TotalRequests,
+		"tokens_today":       todayStats.InputTokens + todayStats.OutputTokens,
+		"input_tokens":       todayStats.InputTokens,
+		"output_tokens":      todayStats.OutputTokens,
+		"cache_read_tokens":  todayStats.CacheReadTokens,
+		"cache_write_tokens": todayStats.CacheWriteTokens,
+		"cost_today":         todayStats.InputCost + todayStats.OutputCost,
+		"failed_today":       todayStats.FailedRequests,
+		"success_rate":       successRate,
+		"avg_latency_ms":     avgLatency,
+		"avg_first_byte_ms":  avgFirstByte,
+		"avg_first_token_ms": avgFirstToken,
+		"total_latency_ms":   todayStats.TotalLatencyMs,
 	})
 }
 

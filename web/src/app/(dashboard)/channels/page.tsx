@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Plus, Pencil, Trash2, X, RefreshCw, Copy } from "lucide-react";
 import { toast } from "sonner";
+import { useI18n } from "@/lib/i18n";
 
 interface Channel {
   id: number;
@@ -46,6 +47,7 @@ function mergedModels(ch: Channel): string[] {
 }
 
 export default function ChannelsPage() {
+  const { t } = useI18n();
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -114,7 +116,7 @@ export default function ChannelsPage() {
         prev.filter((m) => (data.models || []).includes(m))
       );
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Sync failed");
+      toast.error(e instanceof Error ? e.message : t("channels.syncFailed"));
       setSyncOpen(false);
     } finally {
       setSyncLoading(false);
@@ -135,11 +137,11 @@ export default function ChannelsPage() {
         custom_models: syncSelected.join(","),
       };
       await api(`/api/channels/${syncChannel.id}`, { method: "PUT", body: JSON.stringify(payload) });
-      toast.success("Models synced");
+      toast.success(t("channels.modelsSynced"));
       setSyncOpen(false);
       fetchChannels();
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Save failed");
+      toast.error(e instanceof Error ? e.message : t("channels.saveFailed"));
     }
   };
 
@@ -158,16 +160,16 @@ export default function ChannelsPage() {
 
       if (editing) {
         await api(`/api/channels/${editing.id}`, { method: "PUT", body: JSON.stringify(payload) });
-        toast.success("Channel updated");
+        toast.success(t("channels.updated"));
       } else {
         await api("/api/channels", { method: "POST", body: JSON.stringify(payload) });
-        toast.success("Channel created");
+        toast.success(t("channels.created"));
       }
       setDialogOpen(false);
       resetForm();
       fetchChannels();
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Failed");
+      toast.error(e instanceof Error ? e.message : t("common.failed"));
     }
   };
 
@@ -182,7 +184,7 @@ export default function ChannelsPage() {
       setDeleteGroups(data.groups || []);
       setDeleteDialogOpen(true);
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Failed");
+      toast.error(e instanceof Error ? e.message : t("common.failed"));
     }
   };
 
@@ -190,12 +192,12 @@ export default function ChannelsPage() {
     if (!deleteTarget) return;
     try {
       await api(`/api/channels/${deleteTarget.id}`, { method: "DELETE" });
-      toast.success("Channel deleted");
+      toast.success(t("channels.deleted"));
       setDeleteDialogOpen(false);
       setDeleteTarget(null);
       fetchChannels();
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Failed");
+      toast.error(e instanceof Error ? e.message : t("common.failed"));
     }
   };
 
@@ -214,10 +216,10 @@ export default function ChannelsPage() {
           custom_models: ch.custom_models || "",
         }),
       });
-      toast.success("Channel duplicated");
+      toast.success(t("channels.duplicated"));
       fetchChannels();
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Failed");
+      toast.error(e instanceof Error ? e.message : t("common.failed"));
     }
   };
 
@@ -242,24 +244,24 @@ export default function ChannelsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Channels</h1>
-          <p className="text-muted-foreground">Manage upstream LLM provider channels</p>
+          <h1 className="text-2xl font-bold tracking-tight">{t("common.channels")}</h1>
+          <p className="text-muted-foreground">{t("channels.subtitle")}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
           <DialogTrigger render={<Button />}>
-            <Plus className="h-4 w-4 mr-2" />Add Channel
+            <Plus className="h-4 w-4 mr-2" />{t("channels.add")}
           </DialogTrigger>
           <DialogContent className="max-w-lg">
             <DialogHeader>
-              <DialogTitle>{editing ? "Edit Channel" : "New Channel"}</DialogTitle>
+              <DialogTitle>{editing ? t("channels.edit") : t("channels.new")}</DialogTitle>
             </DialogHeader>
             <div className="grid gap-4 py-4">
               <div className="grid gap-2">
-                <Label>Name</Label>
+                <Label>{t("common.name")}</Label>
                 <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="my-openai" />
               </div>
               <div className="grid gap-2">
-                <Label>Type</Label>
+                <Label>{t("channels.type")}</Label>
                 <select
                   className="flex h-8 w-full rounded-lg border border-input bg-transparent px-3 py-1 text-sm transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
                   value={form.type}
@@ -271,19 +273,19 @@ export default function ChannelsPage() {
                 </select>
               </div>
               <div className="grid gap-2">
-                <Label>Base URL</Label>
+                <Label>{t("channels.baseUrl")}</Label>
                 <Input value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} placeholder="https://api.openai.com" />
               </div>
               <div className="grid gap-2">
-                <Label>API Key</Label>
+                <Label>{t("channels.apiKey")}</Label>
                 <Input value={form.key} onChange={(e) => setForm({ ...form, key: e.target.value })} placeholder="sk-..." type="password" />
               </div>
               <div className="grid gap-2">
-                <Label>Proxy (optional)</Label>
+                <Label>{t("channels.proxy")}</Label>
                 <Input value={form.proxy} onChange={(e) => setForm({ ...form, proxy: e.target.value })} placeholder="http://proxy:8080" />
               </div>
               <div className="grid gap-2">
-                <Label>Models</Label>
+                <Label>{t("common.models")}</Label>
                 <div className="flex flex-wrap gap-1 min-h-[32px] rounded-lg border border-input bg-transparent px-2 py-1.5">
                   {form.customModels.length > 0 ? (
                     form.customModels.map((m) => (
@@ -296,14 +298,14 @@ export default function ChannelsPage() {
                           type="button"
                           onClick={() => removeModel(m)}
                           className="ml-0.5 opacity-60 hover:opacity-100"
-                          aria-label={`Remove ${m}`}
+                          aria-label={t("channels.removeModel", { name: m })}
                         >
                           <X className="h-3 w-3" />
                         </button>
                       </span>
                     ))
                   ) : (
-                    <span className="text-xs text-muted-foreground self-center">No models configured</span>
+                    <span className="text-xs text-muted-foreground self-center">{t("channels.noModelsConfigured")}</span>
                   )}
                 </div>
                 <div className="flex gap-2">
@@ -315,14 +317,14 @@ export default function ChannelsPage() {
                     className="h-8 text-sm font-mono"
                   />
                   <Button type="button" variant="outline" size="sm" onClick={addModel} className="h-8 shrink-0">
-                    <Plus className="h-3.5 w-3.5 mr-1" />Add
+                    <Plus className="h-3.5 w-3.5 mr-1" />{t("common.add")}
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Custom model names exposed by this channel. Press Enter or click Add.
+                  {t("channels.addModelHelp")}
                 </p>
               </div>
-              <Button onClick={handleSubmit}>{editing ? "Update" : "Create"}</Button>
+              <Button onClick={handleSubmit}>{editing ? t("common.update") : t("common.create")}</Button>
             </div>
           </DialogContent>
         </Dialog>
@@ -330,7 +332,7 @@ export default function ChannelsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>All Channels</CardTitle>
+          <CardTitle>{t("channels.all")}</CardTitle>
         </CardHeader>
         <CardContent>
           {loading ? (
@@ -341,13 +343,13 @@ export default function ChannelsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-36">Name</TableHead>
-                  <TableHead className="w-24">Type</TableHead>
-                  <TableHead className="w-40">Base URL</TableHead>
-                  <TableHead className="w-20">Status</TableHead>
-                  <TableHead className="w-12">Keys</TableHead>
-                  <TableHead>Models</TableHead>
-                  <TableHead className="text-right w-36">Actions</TableHead>
+                  <TableHead className="w-36">{t("common.name")}</TableHead>
+                  <TableHead className="w-24">{t("channels.type")}</TableHead>
+                  <TableHead className="w-40">{t("channels.baseUrl")}</TableHead>
+                  <TableHead className="w-20">{t("common.status")}</TableHead>
+                  <TableHead className="w-12">{t("channels.keys")}</TableHead>
+                  <TableHead>{t("common.models")}</TableHead>
+                  <TableHead className="text-right w-36">{t("channels.actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -362,7 +364,7 @@ export default function ChannelsPage() {
                     </TableCell>
                     <TableCell>
                       <Badge variant={ch.enabled ? "default" : "secondary"}>
-                        {ch.enabled ? "Active" : "Disabled"}
+                        {ch.enabled ? t("common.active") : t("common.disabled")}
                       </Badge>
                     </TableCell>
                     <TableCell>{ch.keys?.length || 0}</TableCell>
@@ -382,21 +384,21 @@ export default function ChannelsPage() {
                             )}
                           </>
                         ) : (
-                          <span className="text-xs text-muted-foreground">No models</span>
+                          <span className="text-xs text-muted-foreground">{t("channels.noModels")}</span>
                         )}
                       </div>
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button variant="ghost" size="icon" onClick={() => handleSync(ch)} title="Sync models">
+                      <Button variant="ghost" size="icon" onClick={() => handleSync(ch)} title={t("common.sync")}>
                         <RefreshCw className="h-4 w-4" />
                       </Button>
-                      <Button variant="ghost" size="icon" onClick={() => handleDuplicate(ch)} title="Duplicate">
+                      <Button variant="ghost" size="icon" onClick={() => handleDuplicate(ch)} title={t("common.duplicate")}>
                         <Copy className="h-4 w-4" />
                       </Button>
-                      <Button variant="ghost" size="icon" onClick={() => handleEdit(ch)} title="Edit">
+                      <Button variant="ghost" size="icon" onClick={() => handleEdit(ch)} title={t("common.edit")}>
                         <Pencil className="h-4 w-4" />
                       </Button>
-                      <Button variant="ghost" size="icon" onClick={() => handleDelete(ch)} title="Delete">
+                      <Button variant="ghost" size="icon" onClick={() => handleDelete(ch)} title={t("common.delete")}>
                         <Trash2 className="h-4 w-4 text-destructive" />
                       </Button>
                     </TableCell>
@@ -406,7 +408,7 @@ export default function ChannelsPage() {
                 {channels.length === 0 && (
                   <TableRow>
                     <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
-                      No channels yet. Add your first channel to get started.
+                      {t("channels.empty")}
                     </TableCell>
                   </TableRow>
                 )}
@@ -419,27 +421,25 @@ export default function ChannelsPage() {
       <Dialog open={deleteDialogOpen} onOpenChange={(open) => { setDeleteDialogOpen(open); if (!open) setDeleteTarget(null); }}>
         <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle>Delete Channel</DialogTitle>
+            <DialogTitle>{t("channels.deleteTitle")}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-2">
             {deleteGroups.length > 0 ? (
               <>
-                <p className="text-sm">
-                  <span className="font-medium text-destructive">{deleteTarget?.name}</span> is used in the following group{deleteGroups.length > 1 ? "s" : ""}:
-                </p>
+                <p className="text-sm">{t("channels.deleteUsed", { name: deleteTarget?.name ?? "" })}</p>
                 <ul className="text-sm space-y-1 pl-4">
                   {deleteGroups.map((g) => (
                     <li key={g} className="list-disc text-muted-foreground font-mono">{g}</li>
                   ))}
                 </ul>
-                <p className="text-sm text-muted-foreground">Deleting will also remove it from the above group{deleteGroups.length > 1 ? "s" : ""}.</p>
+                <p className="text-sm text-muted-foreground">{t("channels.deleteUsedHint")}</p>
               </>
             ) : (
-              <p className="text-sm">Delete channel <span className="font-medium">{deleteTarget?.name}</span>? This cannot be undone.</p>
+              <p className="text-sm">{t("channels.deleteConfirm", { name: deleteTarget?.name ?? "" })}</p>
             )}
             <div className="flex justify-end gap-2 pt-1">
-              <Button variant="outline" size="sm" onClick={() => setDeleteDialogOpen(false)}>Cancel</Button>
-              <Button variant="destructive" size="sm" onClick={confirmDelete}>Delete</Button>
+              <Button variant="outline" size="sm" onClick={() => setDeleteDialogOpen(false)}>{t("common.cancel")}</Button>
+              <Button variant="destructive" size="sm" onClick={confirmDelete}>{t("common.delete")}</Button>
             </div>
           </div>
         </DialogContent>
@@ -448,7 +448,7 @@ export default function ChannelsPage() {
       <Dialog open={syncOpen} onOpenChange={setSyncOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Sync Models — {syncChannel?.name}</DialogTitle>
+            <DialogTitle>{t("channels.syncTitle", { name: syncChannel?.name ?? "" })}</DialogTitle>
           </DialogHeader>
           {syncLoading ? (
             <div className="space-y-2 py-4">
@@ -457,7 +457,7 @@ export default function ChannelsPage() {
           ) : (
             <div className="space-y-4 py-2">
               {syncAvailable.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No models returned from upstream.</p>
+                <p className="text-sm text-muted-foreground">{t("channels.noUpstreamModels")}</p>
               ) : (
                 <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
                   {syncAvailable.map((m) => (
@@ -480,9 +480,9 @@ export default function ChannelsPage() {
                 </div>
               )}
               <div className="flex justify-end gap-2 pt-2">
-                <Button variant="outline" size="sm" onClick={() => setSyncOpen(false)}>Cancel</Button>
+                <Button variant="outline" size="sm" onClick={() => setSyncOpen(false)}>{t("common.cancel")}</Button>
                 <Button size="sm" onClick={handleSyncSave} disabled={syncAvailable.length === 0}>
-                  Save ({syncSelected.length} selected)
+                  {t("channels.saveSelected", { count: syncSelected.length })}
                 </Button>
               </div>
             </div>

@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Plus, Pencil, Trash2, X, ArrowUp, ArrowDown, Copy } from "lucide-react";
 import { toast } from "sonner";
+import { useI18n } from "@/lib/i18n";
 
 interface ChannelURL {
   url: string;
@@ -114,6 +115,7 @@ function getChannelStatus(
 }
 
 export default function GroupsPage() {
+  const { t } = useI18n();
   const [groups, setGroups] = useState<Group[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [circuitMap, setCircuitMap] = useState<Record<number, CircuitEntry>>({});
@@ -186,37 +188,37 @@ export default function GroupsPage() {
       const payload = { ...form, items: validItems };
       if (editing) {
         await api(`/api/groups/${editing.id}`, { method: "PUT", body: JSON.stringify(payload) });
-        toast.success("Group updated");
+        toast.success(t("groups.updated"));
       } else {
         await api("/api/groups", { method: "POST", body: JSON.stringify(payload) });
-        toast.success("Group created");
+        toast.success(t("groups.created"));
       }
       setDialogOpen(false);
       resetForm();
       fetchGroups();
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Failed");
+      toast.error(e instanceof Error ? e.message : t("common.failed"));
     }
   };
 
   const handleDelete = async (id: number) => {
-    if (!confirm("Delete this group?")) return;
+    if (!confirm(t("groups.deleteConfirm"))) return;
     try {
       await api(`/api/groups/${id}`, { method: "DELETE" });
-      toast.success("Group deleted");
+      toast.success(t("groups.deleted"));
       fetchGroups();
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Failed");
+      toast.error(e instanceof Error ? e.message : t("common.failed"));
     }
   };
 
   const handleDuplicate = async (g: Group) => {
     try {
       await api(`/api/groups/${g.id}/duplicate`, { method: "POST" });
-      toast.success("Group duplicated");
+      toast.success(t("groups.duplicated"));
       fetchGroups();
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Failed");
+      toast.error(e instanceof Error ? e.message : t("common.failed"));
     }
   };
 
@@ -243,32 +245,40 @@ export default function GroupsPage() {
   };
 
   const selectedChannel = (id: number) => channels.find((c) => c.id === id);
+  const modeLabels: Record<string, string> = {
+    round_robin: t("groups.roundRobin"),
+    random: t("groups.random"),
+    failover: t("groups.failover"),
+    weighted: t("groups.weighted"),
+    least_cost: t("groups.leastCost"),
+    least_latency: t("groups.leastLatency"),
+  };
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Groups</h1>
-          <p className="text-muted-foreground">Model routing groups with load balancing</p>
+          <h1 className="text-2xl font-bold tracking-tight">{t("nav.groups")}</h1>
+          <p className="text-muted-foreground">{t("groups.subtitle")}</p>
         </div>
         <Dialog key={editing?.id ?? 'new'} open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
           <DialogTrigger render={<Button />}>
-            <Plus className="h-4 w-4 mr-2" />Add Group
+            <Plus className="h-4 w-4 mr-2" />{t("groups.add")}
           </DialogTrigger>
 
           {/* sm:max-w-4xl overrides the sm:max-w-sm in DialogContent base styles */}
           <DialogContent className="sm:max-w-4xl">
             <DialogHeader>
-              <DialogTitle className="text-lg">{editing ? "Edit Group" : "New Group"}</DialogTitle>
+              <DialogTitle className="text-lg">{editing ? t("groups.edit") : t("groups.new")}</DialogTitle>
             </DialogHeader>
 
             <div className="space-y-6 pt-2">
               {/* Section: Basic Settings */}
               <div className="space-y-4">
-                <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Basic Settings</h3>
+                <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">{t("groups.basicSettings")}</h3>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label htmlFor="group-name">Group Name</Label>
+                    <Label htmlFor="group-name">{t("groups.groupName")}</Label>
                     <Input
                       id="group-name"
                       value={form.name}
@@ -276,10 +286,10 @@ export default function GroupsPage() {
                       placeholder="e.g. internal"
                       className="h-9"
                     />
-                    <p className="text-xs text-muted-foreground">Display name for management</p>
+                    <p className="text-xs text-muted-foreground">{t("groups.nameHelp")}</p>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="group-mode">Balancing Mode</Label>
+                    <Label htmlFor="group-mode">{t("groups.mode")}</Label>
                     <select
                       id="group-mode"
                       className="flex h-9 w-full rounded-lg border border-input bg-transparent px-3 py-1 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -287,14 +297,14 @@ export default function GroupsPage() {
                       onChange={(e) => setForm({ ...form, mode: e.target.value })}
                     >
                       {modes.map((m) => (
-                        <option key={m.value} value={m.value}>{m.label}</option>
+                        <option key={m.value} value={m.value}>{modeLabels[m.value]}</option>
                       ))}
                     </select>
-                    <p className="text-xs text-muted-foreground">How to pick a channel when multiple are available</p>
+                    <p className="text-xs text-muted-foreground">{t("groups.modeHelp")}</p>
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="group-models">Accepted Models</Label>
+                  <Label htmlFor="group-models">{t("groups.acceptedModels")}</Label>
                   <Input
                     id="group-models"
                     value={form.models}
@@ -302,11 +312,11 @@ export default function GroupsPage() {
                     placeholder="e.g. internal, gpt-4o, claude-sonnet-4-5"
                     className="h-9"
                   />
-                  <p className="text-xs text-muted-foreground">Comma-separated exact model names that route to this group.</p>
+                  <p className="text-xs text-muted-foreground">{t("groups.acceptedModelsHelp")}</p>
                 </div>
                 <div className="grid grid-cols-3 gap-4">
                   <div className="space-y-2">
-                    <Label htmlFor="ctx">Context Size (tokens)</Label>
+                    <Label htmlFor="ctx">{t("groups.contextSize")}</Label>
                     <Input
                       id="ctx"
                       type="number"
@@ -316,7 +326,7 @@ export default function GroupsPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="skt">Session Keep (sec)</Label>
+                    <Label htmlFor="skt">{t("groups.sessionKeep")}</Label>
                     <Input
                       id="skt"
                       type="number"
@@ -326,7 +336,7 @@ export default function GroupsPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="ftt">First Token Timeout (sec)</Label>
+                    <Label htmlFor="ftt">{t("groups.firstTokenTimeout")}</Label>
                     <Input
                       id="ftt"
                       type="number"
@@ -342,13 +352,13 @@ export default function GroupsPage() {
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Channels</h3>
+                    <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">{t("common.channels")}</h3>
                     <p className="text-xs text-muted-foreground mt-0.5">
-                      Each entry maps this group to an upstream channel and model. List order determines priority (top = highest).
+                      {t("groups.channelHelp")}
                     </p>
                   </div>
                   <Button variant="outline" size="sm" onClick={() => setItems((prev) => [...prev, emptyItem()])}>
-                    <Plus className="h-3.5 w-3.5 mr-1.5" />Add Channel
+                    <Plus className="h-3.5 w-3.5 mr-1.5" />{t("channels.add")}
                   </Button>
                 </div>
 
@@ -360,7 +370,7 @@ export default function GroupsPage() {
                       <div key={idx} className="rounded-lg border border-border bg-muted/20 p-4 space-y-3">
                         {/* Item header */}
                         <div className="flex items-center justify-between">
-                          <span className="text-xs font-medium text-muted-foreground">Channel {idx + 1}</span>
+                          <span className="text-xs font-medium text-muted-foreground">{t("groups.channelIndex", { index: idx + 1 })}</span>
                           <div className="flex items-center gap-1">
                             <Button
                               variant="ghost"
@@ -394,16 +404,16 @@ export default function GroupsPage() {
 
                         {/* Row 1: channel select (full width) */}
                         <div className="space-y-1.5">
-                          <Label className="text-xs">Channel</Label>
+                          <Label className="text-xs">{t("common.channel")}</Label>
                           <select
                             className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                             value={it.channel_id}
                             onChange={(e) => updateItem(idx, { channel_id: parseInt(e.target.value), model_name: "" })}
                           >
-                            <option value={0}>— select channel —</option>
+                            <option value={0}>{t("groups.selectChannel")}</option>
                             {channels.map((c) => (
                               <option key={c.id} value={c.id}>
-                                {c.name}  ({c.base_urls?.[0]?.url ?? "no url"})
+                                {c.name}  ({c.base_urls?.[0]?.url ?? t("groups.noUrl")})
                               </option>
                             ))}
                           </select>
@@ -420,14 +430,14 @@ export default function GroupsPage() {
 
                         {/* Row 2: model name — dropdown if channel has models, text input otherwise */}
                         <div className="space-y-1.5">
-                          <Label className="text-xs">Upstream Model Name</Label>
+                          <Label className="text-xs">{t("groups.upstreamModel")}</Label>
                           {ch && channelModels(ch).length > 0 ? (
                             <select
                               className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                               value={it.model_name}
                               onChange={(e) => updateItem(idx, { model_name: e.target.value })}
                             >
-                              <option value="">— select model —</option>
+                              <option value="">{t("groups.selectModel")}</option>
                               {channelModels(ch).map((m) => (
                                 <option key={m} value={m}>{m}</option>
                               ))}
@@ -447,14 +457,14 @@ export default function GroupsPage() {
 
                   {items.length === 0 && (
                     <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
-                      No channels added. Click &ldquo;Add Channel&rdquo; above.
+                      {t("groups.noChannelsInForm")}
                     </div>
                   )}
                 </div>
               </div>
 
               <Button onClick={handleSubmit} className="w-full h-10">
-                {editing ? "Update Group" : "Create Group"}
+                {editing ? t("groups.update") : t("groups.create")}
               </Button>
             </div>
           </DialogContent>
@@ -463,7 +473,7 @@ export default function GroupsPage() {
 
       {/* Table */}
       <Card>
-        <CardHeader><CardTitle>All Groups</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{t("groups.all")}</CardTitle></CardHeader>
         <CardContent>
           {loading ? (
             <div className="space-y-2">
@@ -473,17 +483,17 @@ export default function GroupsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-[130px]">Name</TableHead>
-                  <TableHead className="w-[130px]">Mode</TableHead>
-                  <TableHead>Channels</TableHead>
-                  <TableHead className="w-[90px] text-right">Actions</TableHead>
+                  <TableHead className="w-[130px]">{t("common.name")}</TableHead>
+                  <TableHead className="w-[130px]">{t("groups.mode")}</TableHead>
+                  <TableHead>{t("common.channels")}</TableHead>
+                  <TableHead className="w-[90px] text-right">{t("channels.actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {groups.map((g) => (
                   <TableRow key={g.id} className="align-top">
                     <TableCell className="font-medium pt-3">{g.name}</TableCell>
-                    <TableCell className="pt-3"><Badge variant="secondary">{g.mode}</Badge></TableCell>
+                    <TableCell className="pt-3"><Badge variant="secondary">{modeLabels[g.mode] ?? g.mode}</Badge></TableCell>
                     <TableCell>
                       <div className="inline-flex flex-col gap-1.5 py-1 max-w-xs">
                         {g.items?.map((it, i) => {
@@ -497,37 +507,37 @@ export default function GroupsPage() {
                               {status.kind === "running" && (
                                 <span className="inline-flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400">
                                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 inline-block" />
-                                  Running
+                                  {t("groups.running")}
                                 </span>
                               )}
                               {status.kind === "ready" && (
                                 <span className="inline-flex items-center gap-0.5 text-sky-600 dark:text-sky-400">
                                   <span className="h-1.5 w-1.5 rounded-full bg-sky-400 inline-block" />
-                                  Ready
+                                  {t("groups.ready")}
                                 </span>
                               )}
                               {status.kind === "testing" && (
                                 <span className="inline-flex items-center gap-0.5 text-amber-600 dark:text-amber-400">
                                   <span className="h-1.5 w-1.5 rounded-full bg-amber-500 inline-block" />
-                                  Testing
+                                  {t("groups.testing")}
                                 </span>
                               )}
                               {status.kind === "tripped" && (
                                 <span className="inline-flex items-center gap-0.5 text-destructive">
                                   <span className="h-1.5 w-1.5 rounded-full bg-destructive inline-block" />
-                                  Tripped · {status.secsLeft}s
+                                  {t("groups.tripped")} · {status.secsLeft}s
                                 </span>
                               )}
                             </div>
                           );
                         })}
                         {(!g.items || g.items.length === 0) && (
-                          <span className="text-muted-foreground text-xs">none</span>
+                          <span className="text-muted-foreground text-xs">{t("common.none")}</span>
                         )}
                       </div>
                     </TableCell>
                     <TableCell className="text-right pt-2">
-                      <Button variant="ghost" size="icon" onClick={() => handleDuplicate(g)} title="Duplicate">
+                      <Button variant="ghost" size="icon" onClick={() => handleDuplicate(g)} title={t("common.duplicate")}>
                         <Copy className="h-4 w-4" />
                       </Button>
                       <Button variant="ghost" size="icon" onClick={() => handleEdit(g)}>
@@ -542,7 +552,7 @@ export default function GroupsPage() {
                 {groups.length === 0 && (
                   <TableRow>
                     <TableCell colSpan={4} className="text-center text-muted-foreground py-8">
-                      No groups yet. Create a group to start routing models.
+                      {t("groups.empty")}
                     </TableCell>
                   </TableRow>
                 )}
