@@ -91,8 +91,14 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	// Write PID file for `make reload`
 	pidFile := "data/llmux.pid"
-	os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644)
-	defer os.Remove(pidFile)
+	pid := fmt.Sprintf("%d", os.Getpid())
+	os.WriteFile(pidFile, []byte(pid), 0644)
+	defer func() {
+		current, err := os.ReadFile(pidFile)
+		if err == nil && string(current) == pid {
+			os.Remove(pidFile)
+		}
+	}()
 
 	<-upg.Exit()
 
