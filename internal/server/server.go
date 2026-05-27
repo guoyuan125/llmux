@@ -64,6 +64,8 @@ func (s *Server) registerRoutes() {
 		admin.PUT("/channels/:id", h.UpdateChannel)
 		admin.DELETE("/channels/:id", h.DeleteChannel)
 		admin.GET("/channels/:id/sync-models", h.SyncChannelModels)
+		admin.POST("/channels/:id/sync-models", h.SyncChannelModels)
+		admin.POST("/channels/:id/duplicate", h.DuplicateChannel)
 
 		// Groups
 		admin.GET("/groups", h.ListGroups)

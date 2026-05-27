@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -128,8 +129,7 @@ func (h *Handler) SyncChannelModels(c *gin.Context) {
 		return
 	}
 
-	baseURL := ch.BaseURLs[0].URL
-	upstreamURL := baseURL + "/v1/models"
+	upstreamURL := strings.TrimRight(ch.BaseURLs[0].URL, "/") + "/v1/models"
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
@@ -139,8 +139,8 @@ func (h *Handler) SyncChannelModels(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build request: " + err.Error()})
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	setModelSyncAuthHeaders(req, ch.Type, apiKey)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -181,6 +181,59 @@ func (h *Handler) SyncChannelModels(c *gin.Context) {
 	sort.Strings(models)
 
 	c.JSON(http.StatusOK, gin.H{"models": models})
+}
+
+func setModelSyncAuthHeaders(req *http.Request, channelType model.ChannelType, apiKey string) {
+	switch channelType {
+	case model.ChannelTypeAnthropic:
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+	case model.ChannelTypeGemini:
+		req.Header.Set("x-goog-api-key", apiKey)
+	default:
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+}
+
+// DuplicateChannel copies an existing channel, including URLs, keys, and model config.
+func (h *Handler) DuplicateChannel(c *gin.Context) {
+	id := c.Param("id")
+	var src model.Channel
+	if err := h.db.Preload("BaseURLs").Preload("Keys").First(&src, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+		return
+	}
+
+	newChannel := model.Channel{
+		Name:          src.Name + " (copy)",
+		Type:          src.Type,
+		Enabled:       src.Enabled,
+		Models:        src.Models,
+		CustomModels:  src.CustomModels,
+		AutoSync:      src.AutoSync,
+		Proxy:         src.Proxy,
+		ParamOverride: src.ParamOverride,
+	}
+	for _, u := range src.BaseURLs {
+		newChannel.BaseURLs = append(newChannel.BaseURLs, model.ChannelURL{
+			URL:     u.URL,
+			Latency: u.Latency,
+		})
+	}
+	for _, k := range src.Keys {
+		newChannel.Keys = append(newChannel.Keys, model.ChannelKey{
+			Key:     k.Key,
+			Enabled: k.Enabled,
+			Remark:  k.Remark,
+		})
+	}
+
+	if err := h.db.Session(&gorm.Session{FullSaveAssociations: true}).Create(&newChannel).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	h.db.Preload("BaseURLs").Preload("Keys").First(&newChannel, newChannel.ID)
+	c.JSON(http.StatusCreated, newChannel)
 }
 
 // DeleteChannel deletes a channel, its nested BaseURLs and Keys, and any GroupItems referencing it.

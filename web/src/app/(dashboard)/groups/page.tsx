@@ -38,6 +38,15 @@ function channelModels(ch: Channel): string[] {
   return Array.from(new Set(parts));
 }
 
+function channelModelOptions(ch: Channel, currentModel: string): string[] {
+  const models = channelModels(ch);
+  const current = currentModel.trim();
+  if (current && !models.includes(current)) {
+    return [current, ...models];
+  }
+  return models;
+}
+
 interface GroupItem {
   channel_id: number;
   model_name: string;
@@ -366,6 +375,7 @@ export default function GroupsPage() {
                   {items.map((it, idx) => {
                     const ch = selectedChannel(it.channel_id);
                     const baseUrl = ch?.base_urls?.[0]?.url ?? "";
+                    const modelOptions = ch ? channelModelOptions(ch, it.model_name) : [];
                     return (
                       <div key={idx} className="rounded-lg border border-border bg-muted/20 p-4 space-y-3">
                         {/* Item header */}
@@ -431,14 +441,14 @@ export default function GroupsPage() {
                         {/* Row 2: model name — dropdown if channel has models, text input otherwise */}
                         <div className="space-y-1.5">
                           <Label className="text-xs">{t("groups.upstreamModel")}</Label>
-                          {ch && channelModels(ch).length > 0 ? (
+                          {ch && modelOptions.length > 0 ? (
                             <select
                               className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                               value={it.model_name}
                               onChange={(e) => updateItem(idx, { model_name: e.target.value })}
                             >
                               <option value="">{t("groups.selectModel")}</option>
-                              {channelModels(ch).map((m) => (
+                              {modelOptions.map((m) => (
                                 <option key={m} value={m}>{m}</option>
                               ))}
                             </select>

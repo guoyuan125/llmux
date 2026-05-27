@@ -2,4 +2,4 @@
 2:I[24947,["/_next/static/chunks/07gcasvwhqnz6.js","/_next/static/chunks/123oozob8oz70.js","/_next/static/chunks/0fzh1rnjebvo_.js","/_next/static/chunks/0-e2ea~ma7vjr.js","/_next/static/chunks/0_x51ql78h93g.js"],"default"]
 3:I[546,["/_next/static/chunks/07gcasvwhqnz6.js","/_next/static/chunks/123oozob8oz70.js","/_next/static/chunks/0fzh1rnjebvo_.js","/_next/static/chunks/0-e2ea~ma7vjr.js","/_next/static/chunks/0_x51ql78h93g.js"],"default"]
 4:[]
-0:{"rsc":["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","template":["$","$L3",null,{}]}]]}],"isPartial":false,"staleTime":300,"varyParams":"$W4","buildId":"AptBtwjZ-6xnfiN2o0nn-"}
+0:{"rsc":["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","template":["$","$L3",null,{}]}]]}],"isPartial":false,"staleTime":300,"varyParams":"$W4","buildId":"W7MnasXXKwQg4V3mnofsW"}

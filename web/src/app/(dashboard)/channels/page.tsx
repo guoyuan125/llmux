@@ -109,12 +109,9 @@ export default function ChannelsPage() {
     setSyncOpen(true);
     setSyncLoading(true);
     try {
-      const data = await api<{ models: string[] }>(`/api/channels/${ch.id}/sync-models`);
-      setSyncAvailable(data.models || []);
-      // Keep pre-selection only for models that exist upstream
-      setSyncSelected((prev) =>
-        prev.filter((m) => (data.models || []).includes(m))
-      );
+      const data = await api<{ models: string[] }>(`/api/channels/${ch.id}/sync-models`, { method: "POST" });
+      const upstreamModels = data.models || [];
+      setSyncAvailable((prev) => Array.from(new Set([...prev, ...upstreamModels])));
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : t("channels.syncFailed"));
       setSyncOpen(false);
@@ -203,19 +200,7 @@ export default function ChannelsPage() {
 
   const handleDuplicate = async (ch: Channel) => {
     try {
-      await api("/api/channels", {
-        method: "POST",
-        body: JSON.stringify({
-          name: ch.name + " (copy)",
-          type: ch.type,
-          enabled: ch.enabled,
-          base_urls: ch.base_urls.map(({ url }) => ({ url })),
-          keys: ch.keys.map(({ key, enabled }) => ({ key, enabled })),
-          proxy: ch.proxy || "",
-          param_override: ch.param_override || "",
-          custom_models: ch.custom_models || "",
-        }),
-      });
+      await api(`/api/channels/${ch.id}/duplicate`, { method: "POST" });
       toast.success(t("channels.duplicated"));
       fetchChannels();
     } catch (e: unknown) {
