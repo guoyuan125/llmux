@@ -127,3 +127,45 @@ func TestSessionStickiness_ChannelStillInGroup(t *testing.T) {
 		t.Errorf("expected sticky channel %d at front, got %d", stickyID, candidates[0].ChannelID)
 	}
 }
+
+func TestIsAnthropicTextDelta(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{
+			name: "visible text delta",
+			data: `{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"OK"}}`,
+			want: true,
+		},
+		{
+			name: "thinking delta is not visible text",
+			data: `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reasoning"}}`,
+			want: false,
+		},
+		{
+			name: "message start is not visible text",
+			data: `{"type":"message_start","message":{"content":[]}}`,
+			want: false,
+		},
+		{
+			name: "empty text delta is not visible text",
+			data: `{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":""}}`,
+			want: false,
+		},
+		{
+			name: "invalid json",
+			data: `{`,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAnthropicTextDelta(tt.data); got != tt.want {
+				t.Fatalf("isAnthropicTextDelta() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

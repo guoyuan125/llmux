@@ -381,7 +381,7 @@ func (g *Gateway) HandleRelay(c *gin.Context, inboundType InboundType) {
 
 	// Save error audit log with request body for debugging
 	errChannel := &model.Channel{Name: "none"}
-	go g.saveAuditLog(nil, errChannel, requestModel, group.Name, "", latencyMs, 0, 0, apiKeyID, attempts, fmt.Errorf("%s", errMsg), body)
+	go g.saveAuditLog(nil, errChannel, requestModel, group.Name, "", http.StatusBadGateway, latencyMs, 0, 0, isStream, apiKeyID, attempts, fmt.Errorf("%s", errMsg), body)
 
 	c.JSON(http.StatusBadGateway, gin.H{"error": errMsg})
 }
@@ -412,7 +412,7 @@ func (g *Gateway) handleNonStreamResponse(c *gin.Context, resp *http.Response, i
 
 	// Record metrics
 	latencyMs := time.Since(startTime).Milliseconds()
-	g.recordMetrics(internalResp, channel, rctx, latencyMs, firstByteMs, apiKeyID, attempts, key)
+	g.recordMetrics(internalResp, channel, rctx, resp.StatusCode, latencyMs, firstByteMs, apiKeyID, attempts, key)
 
 	c.Data(http.StatusOK, "application/json", clientBody)
 }
@@ -488,7 +488,7 @@ func (g *Gateway) handleStreamResponse(c *gin.Context, resp *http.Response, inAd
 				if !firstTokenTime.IsZero() {
 					ftMs = firstTokenTime.Sub(startTime).Milliseconds()
 				}
-				g.recordStreamMetrics(inAdapter, channel, rctx, latencyMs, firstByteMs, ftMs, apiKeyID, attempts, key)
+				g.recordStreamMetrics(inAdapter, channel, rctx, resp.StatusCode, latencyMs, firstByteMs, ftMs, apiKeyID, attempts, key)
 				return
 			}
 
@@ -533,7 +533,7 @@ func (g *Gateway) handleStreamResponse(c *gin.Context, resp *http.Response, inAd
 				if !firstTokenTime.IsZero() {
 					ftMs = firstTokenTime.Sub(startTime).Milliseconds()
 				}
-				g.recordStreamMetrics(inAdapter, channel, rctx, latencyMs, firstByteMs, ftMs, apiKeyID, attempts, key)
+				g.recordStreamMetrics(inAdapter, channel, rctx, resp.StatusCode, latencyMs, firstByteMs, ftMs, apiKeyID, attempts, key)
 				return
 			}
 		}
@@ -621,7 +621,7 @@ func (g *Gateway) handleStreamPassthrough(c *gin.Context, resp *http.Response, c
 			c.Writer.Write([]byte(line + "\n"))
 			flusher.Flush()
 
-			if firstToken && strings.HasPrefix(line, "data: ") {
+			if firstToken && strings.HasPrefix(line, "data: ") && isAnthropicTextDelta(line[6:]) {
 				firstToken = false
 				firstTokenTime = time.Now()
 				if firstTokenTimer != nil {
@@ -654,7 +654,7 @@ func (g *Gateway) handleStreamPassthrough(c *gin.Context, resp *http.Response, c
 		resp2 = &types.InternalResponse{Usage: &usage}
 	}
 	g.recordUsageMetrics(resp2, channel, rctx)
-	go g.saveAuditLog(resp2, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, firstByteMs, ftMs, apiKeyID, attempts, nil, nil)
+	go g.saveAuditLog(resp2, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, resp.StatusCode, latencyMs, firstByteMs, ftMs, true, apiKeyID, attempts, nil, nil)
 }
 
 // extractAnthropicUsage parses usage fields from Anthropic SSE event data.
@@ -689,6 +689,20 @@ func (g *Gateway) extractAnthropicUsage(data string, usage *types.Usage) {
 			usage.CompletionTokens = event.Usage.OutputTokens
 		}
 	}
+}
+
+func isAnthropicTextDelta(data string) bool {
+	var event struct {
+		Type  string `json:"type"`
+		Delta *struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"delta,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
+		return false
+	}
+	return event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" && event.Delta.Text != ""
 }
 
 // handleNonStreamPassthrough relays non-streaming response body directly to the client.
@@ -731,20 +745,20 @@ func (g *Gateway) handleNonStreamPassthrough(c *gin.Context, resp *http.Response
 	}
 
 	g.recordUsageMetrics(ir, channel, rctx)
-	go g.saveAuditLog(ir, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, firstByteMs, 0, apiKeyID, attempts, nil, nil)
+	go g.saveAuditLog(ir, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, resp.StatusCode, latencyMs, firstByteMs, 0, false, apiKeyID, attempts, nil, nil)
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
 }
 
-func (g *Gateway) recordMetrics(resp *types.InternalResponse, channel *model.Channel, rctx routeCtx, latencyMs, firstByteMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
+func (g *Gateway) recordMetrics(resp *types.InternalResponse, channel *model.Channel, rctx routeCtx, statusCode int, latencyMs, firstByteMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
 	metrics.RequestsTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "status": "success"}).Inc()
 	metrics.RequestDuration.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
 	g.recordUsageMetrics(resp, channel, rctx)
 
 	// Save audit log asynchronously
-	go g.saveAuditLog(resp, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, firstByteMs, 0, apiKeyID, attempts, nil, nil)
+	go g.saveAuditLog(resp, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, statusCode, latencyMs, firstByteMs, 0, false, apiKeyID, attempts, nil, nil)
 }
 
-func (g *Gateway) recordStreamMetrics(inAdapter types.Inbound, channel *model.Channel, rctx routeCtx, latencyMs, firstByteMs, firstTokenMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
+func (g *Gateway) recordStreamMetrics(inAdapter types.Inbound, channel *model.Channel, rctx routeCtx, statusCode int, latencyMs, firstByteMs, firstTokenMs int64, apiKeyID uint, attempts int, key *model.ChannelKey) {
 	metrics.RequestsTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "status": "success"}).Inc()
 	metrics.RequestDuration.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name}).Observe(float64(latencyMs) / 1000.0)
 
@@ -752,7 +766,7 @@ func (g *Gateway) recordStreamMetrics(inAdapter types.Inbound, channel *model.Ch
 	resp, _ := inAdapter.GetInternalResponse(context.Background())
 	g.recordUsageMetrics(resp, channel, rctx)
 
-	go g.saveAuditLog(resp, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, firstByteMs, firstTokenMs, apiKeyID, attempts, nil, nil)
+	go g.saveAuditLog(resp, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, statusCode, latencyMs, firstByteMs, firstTokenMs, true, apiKeyID, attempts, nil, nil)
 }
 
 func (g *Gateway) recordUsageMetrics(resp *types.InternalResponse, channel *model.Channel, rctx routeCtx) {
@@ -771,7 +785,7 @@ func (g *Gateway) recordUsageMetrics(resp *types.InternalResponse, channel *mode
 	metrics.CacheRequestsTotal.With(prometheus.Labels{"model": rctx.RequestModel, "channel": channel.Name, "result": cacheResult}).Inc()
 }
 
-func (g *Gateway) saveAuditLog(resp *types.InternalResponse, channel *model.Channel, requestModel, groupName, upstreamModel string, latencyMs, firstByteMs, firstTokenMs int64, apiKeyID uint, attempts int, lastErr error, reqBody []byte) {
+func (g *Gateway) saveAuditLog(resp *types.InternalResponse, channel *model.Channel, requestModel, groupName, upstreamModel string, statusCode int, latencyMs, firstByteMs, firstTokenMs int64, stream bool, apiKeyID uint, attempts int, lastErr error, reqBody []byte) {
 	audit := model.AuditLog{
 		APIKeyID:      apiKeyID,
 		Model:         requestModel,
@@ -779,11 +793,12 @@ func (g *Gateway) saveAuditLog(resp *types.InternalResponse, channel *model.Chan
 		UpstreamModel: upstreamModel,
 		ChannelID:     channel.ID,
 		ChannelName:   channel.Name,
+		StatusCode:    statusCode,
 		LatencyMs:     latencyMs,
 		FirstByteMs:   firstByteMs,
 		FirstTokenMs:  firstTokenMs,
 		Attempts:      attempts,
-		Stream:        firstTokenMs > 0,
+		Stream:        stream,
 	}
 
 	if resp != nil && resp.Usage != nil {
@@ -1029,7 +1044,7 @@ func (g *Gateway) handleEmbeddingPassthrough(c *gin.Context, resp *http.Response
 	// Parse usage for audit log (best-effort)
 	ir, _ := outAdapter.TransformResponse(c.Request.Context(), resp.StatusCode, body)
 	g.recordUsageMetrics(ir, channel, rctx)
-	go g.saveAuditLog(ir, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, latencyMs, firstByteMs, 0, apiKeyID, attempts, nil, nil)
+	go g.saveAuditLog(ir, channel, rctx.RequestModel, rctx.GroupName, rctx.UpstreamModel, resp.StatusCode, latencyMs, firstByteMs, 0, false, apiKeyID, attempts, nil, nil)
 
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
